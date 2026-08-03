@@ -273,6 +273,10 @@ rather than a rewrite.
 
 ## Contributing
 
+**Start with [docs/handoff.md](docs/handoff.md)** — how to build and verify, how
+Linux is tested from Windows, the non-obvious constraints that will otherwise
+cost you an afternoon, and the invariants not to undo.
+
 Issues and pull requests are welcome. Two things worth knowing before you start:
 
 The engine (`encino-core`) forbids `unsafe` and does no terminal I/O — please
