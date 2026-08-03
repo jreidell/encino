@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Never let a real vault or a test document escape into history.
+.encino/
+*.lkf
+/sandbox/

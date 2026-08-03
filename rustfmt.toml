@@ -1,0 +1,4 @@
+# Wider than the default 100. Much of this code is cryptographic plumbing whose
+# call sites read better on one line than wrapped across four.
+max_width = 110
+use_small_heuristics = "Max"

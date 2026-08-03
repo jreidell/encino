@@ -1,0 +1,24 @@
+# Link the C runtime statically so the binaries depend on nothing but Windows
+# itself.
+#
+# Without this, Rust's MSVC target imports `vcruntime140.dll`, which is part of
+# the Visual C++ redistributable rather than the operating system. It is present
+# on most Windows machines but is not guaranteed on a clean install, and when it
+# is missing the program does not start — with an error message that tells the
+# user nothing useful. For a tool people copy onto a machine to reach their own
+# documents, that is the worst possible failure.
+#
+# The cost is roughly 100 KB per binary. Nothing, against never having to think
+# about a redistributable again.
+
+# Careful: setting the RUSTFLAGS environment variable *replaces* these flags
+# rather than adding to them. Anything that exports RUSTFLAGS — a CI workflow, a
+# shell profile — silently turns static linking off, and the only symptom is a
+# release binary that refuses to start on a machine without the Visual C++
+# redistributable. CI checks for that import for exactly this reason.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

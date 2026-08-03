@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = ["src/encino-core", "src/encino-agent", "src/encino-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jreidell/encino"
+
+[workspace.dependencies]
+encino-core = { path = "src/encino-core" }
+encino-agent = { path = "src/encino-agent" }
+
+# Cryptography
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.9"
+zeroize = { version = "1.8", features = ["derive"] }
+secrecy = "0.10"
+bip39 = "2"
+subtle = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "local-offset"] }
+
+# Errors and CLI
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+
+# Unix system calls, via a safe wrapper so encino-core can keep forbidding unsafe
+rustix = { version = "1", features = ["fs", "process"] }
+
+# Dev
+tempfile = "3"
+proptest = "1"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+# Crypto code must not be inlined away into surprising shapes, but more
+# importantly a vault tool should be small and quick to audit.
+opt-level = 3
+lto = "thin"
+strip = "debuginfo"
+panic = "abort"

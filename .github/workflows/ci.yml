@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately no RUSTFLAGS here. The environment variable *replaces*
+  # `[target.*] rustflags` from .cargo/config.toml rather than merging with it,
+  # so setting it would silently discard `-C target-feature=+crt-static` and
+  # produce release binaries that need the Visual C++ redistributable — the very
+  # thing static linking exists to avoid. `-D warnings` is passed to clippy
+  # directly instead, which is where it belongs.
+
+jobs:
+  test:
+    # Both platforms the README claims. A cross-platform claim nobody checks is
+    # a claim that quietly stops being true.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The agent tests start a real background process and drive it over a
+      # named pipe or Unix socket, so they need the binaries actually built.
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+  release-build:
+    # The statically linked binaries are what people download, so confirm they
+    # still link and run. A missing runtime dependency only shows up here.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Confirm the binaries run
+        run: |
+          ./target/release/encino.exe --version
+          ./target/release/encino.exe passphrase --words 6
+
+      - name: Confirm no Visual C++ redistributable is required
+        shell: bash
+        run: |
+          if grep -a -o -i 'vcruntime[0-9]*\.dll' target/release/encino.exe; then
+            echo "::error::encino.exe imports the VC++ runtime; crt-static is not taking effect"
+            exit 1
+          fi
+          echo "statically linked: no vcruntime import"

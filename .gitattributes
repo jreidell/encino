@@ -1,0 +1,9 @@
+# Normalise line endings to LF in both the repository and the working tree, so
+# a checkout is byte-identical on every platform and CI on Linux sees what a
+# Windows developer sees.
+* text=auto eol=lf
+
+# Never convert the vendored word list. Its SHA-256 is recorded so that the
+# copy can be checked against the file EFF publishes; line-ending conversion
+# changes every line and makes that check fail for an innocent reason.
+src/encino-core/wordlists/eff_large_wordlist.txt -text

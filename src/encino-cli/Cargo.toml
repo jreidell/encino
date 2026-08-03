@@ -1,0 +1,29 @@
+[package]
+name = "encino-cli"
+description = "Command-line front-end for the encino vault."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# One binary, and only one. The session daemon is a hidden `agent` subcommand of
+# this same executable, started by `unlock` re-executing itself — so there is
+# nothing to install alongside it and no second file to lose or mismatch.
+[[bin]]
+name = "encino"
+path = "src/main.rs"
+
+[dependencies]
+encino-core.workspace = true
+encino-agent.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+anyhow.workspace = true
+zeroize.workspace = true
+time.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
