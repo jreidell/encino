@@ -27,13 +27,19 @@ rustix = { workspace = true, features = ["mm"] }
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Every feature this crate's own code needs is listed, including
+# Win32_System_Console for the standard-handle work in `win.rs`. Relying on
+# another crate in the workspace to enable it happens to work, because feature
+# unification hands it over from rpassword, but it breaks the moment this crate
+# is built or tested on its own.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Threading",
-    "Win32_Storage_FileSystem",
 ] }

@@ -5,7 +5,10 @@ members = ["src/encino-core", "src/encino-agent", "src/encino-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Edition 2024 needs 1.85; `time` 0.3.47 raises it to 1.88, and that version is
+# the fix for RUSTSEC-2026-0009. Staying on 1.85 would mean pinning a crate with
+# a live advisory, which is the worse trade.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jreidell/encino"
 

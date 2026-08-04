@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly, so a newly published advisory against an unchanged dependency is
+    # found by the schedule rather than by the next commit that happens along.
+    - cron: '0 6 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,6 +51,29 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  audit:
+    # `Cargo.lock` is committed, so builds are pinned to exact versions and
+    # hashes — which is what makes the "maintainer publishes a malicious new
+    # version" attack a non-event here. The gap that leaves is the opposite one:
+    # an advisory filed against a version already pinned, which nothing surfaces
+    # on its own. This job is that alarm.
+    #
+    # Scheduled as well as on push, because a dependency does not have to change
+    # for it to become known-vulnerable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Denies warnings too, so an unmaintained crate in the dependency tree is
+      # reported rather than accumulating silently.
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
 
   release-build:
     # The statically linked binaries are what people download, so confirm they

@@ -3,6 +3,8 @@
 Normative description of what encino writes to disk. Anything not specified here
 is an implementation detail and may change without a version bump.
 
+For what encino is and how to use it, start at the [README](../README.md).
+
 All multi-byte integers are little-endian. All binary values embedded in JSON are
 base64 (standard alphabet, padded).
 
@@ -108,6 +110,7 @@ a security property.
 magic         8 bytes    "ENCINOB1"
 chunk_size    4 bytes    plaintext bytes per chunk (1 048 576 in v1)
 chunk_count   8 bytes    number of chunks that follow
+plaintext_len 8 bytes    the document's true length, before padding
 chunks        chunk_count × (24-byte nonce ‖ ciphertext ‖ 16-byte tag)
 ```
 
@@ -115,15 +118,70 @@ Every chunk is sealed with XChaCha20-Poly1305 under the document's content key
 with a fresh random nonce. Chunking bounds memory: a multi-gigabyte document must
 not require full materialization in RAM to be verified.
 
-Each chunk's associated data binds it to its document, its position, and whether
-it ends the document:
+The chunks cover `padded_len(plaintext_len)` bytes of plaintext: the document
+followed by zeros. A reader emits only the first `plaintext_len` of them.
+
+### Size padding
 
 ```
-AAD = "ENCINOB1" ‖ blob_id (16 bytes) ‖ chunk_index (8 bytes) ‖ is_final (1 byte)
+MIN_BLOB_BYTES = 4096
+
+padded_len(L):
+    if L ≤ MIN_BLOB_BYTES: return MIN_BLOB_BYTES
+    E = ⌊log₂ L⌋
+    S = ⌊log₂ E⌋ + 1
+    return L rounded up to a multiple of 2^(E−S)
+```
+
+This is Padmé, from the PURB paper, with a floor. Without padding a blob's size
+approximates its document's, which is enough to confirm a guessed document —
+a specific tax form, a specific contract — without any ability to decrypt it.
+
+Padmé bounds the *relative* leak: overhead is at most 11.9%, and what a file's
+size still reveals is roughly `log log L` bits. The floor supplies what Padmé
+alone does not, which is that every document below 4 KiB is exactly the same size
+on disk; Padmé pads a 200-byte note to 200 bytes and leaves it as identifying as
+it was.
+
+Padding is zero-filled and lies inside the AEAD, so it is indistinguishable from
+content. A reader must reject padding that is not zero. That check stops no
+attack — sealed padding cannot be forged — but it makes the rule normative, so a
+divergent implementation fails loudly instead of quietly.
+
+`padded_len` is monotonic, which matters: a bucket function that let a larger
+document produce a smaller file would leak more than the padding hides.
+
+Readers must reject a `plaintext_len` above 2⁴⁸, which bounds the arithmetic
+above against a hostile header.
+
+### Chunk associated data
+
+Each chunk's associated data binds it to its document, its position, whether it
+ends the document, and — on the final chunk — the document's true length:
+
+```
+AAD = "ENCINOB1" ‖ blob_id (16) ‖ chunk_index (8) ‖ is_final (1) ‖ len_field (8)
+
+len_field = plaintext_len   on the final chunk
+          = 0               on every other chunk
 ```
 
 Binding the blob ID defeats splicing chunks between documents; binding the index
-defeats reordering; binding `is_final` defeats truncation.
+defeats reordering; binding `is_final` defeats truncation; binding
+`plaintext_len` defeats a re-declared length.
+
+That last one is what padding makes necessary. `plaintext_len` sits in the
+unauthenticated header, and with slack after the document an attacker who could
+re-declare the length would truncate the plaintext while every chunk still
+verified — the reader would simply treat the rest as padding. Binding it closes
+that, and no other chunk can be promoted to final because `is_final` is bound too.
+
+**Why only the final chunk carries it.** The true length is unknown until the
+source is exhausted. Binding it into every chunk would mean no chunk could be
+sealed until the whole document had been read, which forfeits streaming. The
+final chunk is the one place a streaming writer already knows the total, and one
+authenticated binding is all it takes to make the header field unforgeable. This
+is the same trade as `is_final` standing in for `chunk_count` below.
 
 That last one carries the subtlety. The header is not authenticated, so an
 attacker can freely edit `chunk_count`. Dropping the last chunk *and* decrementing
@@ -138,11 +196,16 @@ as it goes. The flag carries the part that matters and needs only one chunk of
 lookahead.
 
 **Every blob has at least one chunk.** A zero-length document is stored as a
-single empty final chunk, not as zero chunks. Otherwise a blob truncated to its
-header alone would be indistinguishable from a legitimately empty document. A
-reader must reject `chunk_count == 0`.
+single final chunk of 4096 padding bytes, not as zero chunks. Otherwise a blob
+truncated to its header alone would be indistinguishable from a legitimately
+empty document. A reader must reject `chunk_count == 0`.
 
 All chunks are full except the last, which may be shorter.
+
+A reader must also check that the chunks decrypt to exactly
+`padded_len(plaintext_len)` bytes. The padded length is *derived* from the
+authenticated length and never read from the file: a padding length the file
+could choose is a padding length an attacker chooses.
 
 ## index.enc
 
@@ -253,8 +316,11 @@ window in which another session could replace the index in between.
 
 Changes requiring a `format_version` bump:
 
-- **Size padding.** Blob sizes currently approximate plaintext sizes. Padding to
-  buckets would close this, at a storage cost.
+- **Hiding the document count.** Padding hides how large each document is, but
+  the number of blobs is still a directory listing away. Closing that needs
+  decoy blobs, whose cost is ongoing rather than one-off.
+- **Hiding access times.** Filesystem timestamps on blobs reveal when a document
+  was last checked in.
 - **Additional key wraps.** The `wraps` array is already a list, so adding a
   TPM- or Windows-Hello-sealed entry is additive and may not need a bump.
 - **Compression** before encryption. Not in v1: compressing before encrypting

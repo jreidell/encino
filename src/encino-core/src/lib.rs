@@ -38,6 +38,6 @@ pub use vault::{Vault, VaultMeta};
 pub const VAULT_DIR: &str = ".encino";
 
 /// On-disk format version. Written to `vault.json` at init and checked on every
-/// open, so that a future revision (size padding, for one) can be introduced
-/// without silently misreading an older vault.
+/// open, so that a future revision — hiding the document count, for one — can be
+/// introduced without silently misreading an older vault.
 pub const FORMAT_VERSION: u32 = 1;

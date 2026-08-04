@@ -52,8 +52,9 @@ defects:
   `init`.
 - Weak passphrases. Argon2id raises the cost of guessing; it cannot rescue a
   poor choice.
-- Document count and approximate sizes being visible on disk. Known leakage,
-  recorded in the format spec, with size padding reserved for a future version.
+- The number of documents, and each one's padded size bucket, being visible on
+  disk. Known leakage, recorded in the format spec. Sizes are padded; the count
+  is not hidden, and hiding it is reserved for a future version.
 
 If you are unsure which side something falls on, report it. A judgement call in
 your favour costs me a few minutes; the opposite could cost someone their

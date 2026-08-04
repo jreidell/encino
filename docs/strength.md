@@ -3,6 +3,8 @@
 Every figure here was measured against this build and the word lists it ships,
 not quoted from memory. The commands used are noted so they can be re-run.
 
+For what encino is and how to use it, start at the [README](../README.md).
+
 The short version, if you read nothing else:
 
 > Your documents are protected by a 256-bit random key nobody will ever guess.
@@ -549,7 +551,13 @@ amount of entropy touches:
 3. **Close documents when finished.** Malware running as you while a document is
    checked out reads it as plainly as you do. `encino status` shows what is
    exposed; the auto-close timer exists for the times you forget.
-4. **Keep the machine clean.** A keylogger captures the passphrase as you type
+4. **Lock before closing the lid.** Hibernating writes all of memory to disk, and
+   the locked pages holding the master key are not exempt — locking them keeps
+   them out of the page file, which is a different file. Sleep becomes
+   hibernation on a timer on most laptops, so shutting the lid is enough. `encino
+   lock` is the only thing that removes the key from memory; volume encryption
+   covers the hibernation file for the times you forget.
+5. **Keep the machine clean.** A keylogger captures the passphrase as you type
    it, and no key-stretching helps.
 
 See [threat-model.md](threat-model.md) for the full boundary, including what

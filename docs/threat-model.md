@@ -4,6 +4,8 @@ This document states plainly what encino protects against and what it does not.
 A security tool that overstates its guarantees is worse than no tool, because it
 changes the user's behaviour without changing their exposure.
 
+For what encino is and how to use it, start at the [README](../README.md).
+
 ## What encino is for
 
 A folder of sensitive personal documents — financial statements, tax records,
@@ -19,18 +21,24 @@ disk.
 | Document filenames | Yes — held only in the encrypted index |
 | Folder and subfolder structure | Yes — the blob store is flat |
 | Document count | **No** — the number of blobs is visible |
-| Document sizes | **No** — blob size approximates plaintext size |
+| Document sizes | Partly — padded to a bucket, so only the bucket shows |
 | Access times | **No** — filesystem timestamps on blobs are visible |
 
-The three unprotected items are accepted for v1 and recorded in `format.md` as
-candidates for a future format revision. Size padding is the mitigation for the
-second, and it is the reason the format carries a version field from day one.
+Sizes are padded with Padmé, floored at 4 KiB: every document under 4 KiB is
+exactly the same size on disk, and above that the padding costs at most 12% and
+leaves roughly `log log n` bits of the size visible. That is enough to tell a
+note from a scan, and not enough to confirm a specific document by its size —
+which is the attack that mattered. See `format.md` for the construction.
+
+The count and the access times remain visible, and are recorded in `format.md`
+as candidates for a future revision. Hiding the count needs decoy blobs, which
+carry an ongoing storage cost rather than a one-off one.
 
 ## In scope — attacks encino defends against
 
 **Lost or stolen machine.** The vault is at rest. An attacker with the disk
-learns the number and rough sizes of the documents and nothing else. Recovering
-contents requires the passphrase or the recovery code.
+learns the number of documents and each one's size bucket, and nothing else.
+Recovering contents requires the passphrase or the recovery code.
 
 **Leaked backup or cloud-sync copy.** Because the vault's resting state is
 encrypted, a backup captures ciphertext. This is the reason for per-file
@@ -56,9 +64,25 @@ it. This is the fundamental limit of at-rest encryption on a compromised host.
 **Keylogging.** A kernel or user-mode keylogger captures the passphrase as it is
 typed. No amount of key stretching helps.
 
-**Memory capture.** A full memory dump, a kernel debugger, or hibernation while
-unlocked can expose the master key. `VirtualLock` prevents the key from reaching
-the pagefile but does not defend against an attacker who can read process memory.
+**Memory capture.** A full memory dump or a kernel debugger can expose the master
+key. `VirtualLock` prevents the key from reaching the pagefile but does not
+defend against an attacker who can read process memory.
+
+**Hibernation while unlocked.** This deserves its own entry, because it is the
+one case in this section that happens by accident rather than by an attacker's
+effort. Hibernating writes all of physical memory to `hiberfil.sys` or the swap
+device, and locked pages are not exempt: `VirtualLock` and `mlock` keep the key
+out of the page file, which is a different thing. Closing a laptop lid is enough,
+since sleep escalates to hibernation once its timer expires — the default on most
+laptops. So:
+
+- Run `encino lock` before closing the lid. It is the only action that removes
+  the key from memory.
+- `--timer` bounds the exposure but does not remove it. A machine that hibernates
+  while a session is live writes the key out before the timer can fire.
+- Encrypt the whole volume, which covers the hibernation file. BitLocker protects
+  `hiberfil.sys`; on Linux the swap device must be encrypted too, as encrypting
+  only the root filesystem leaves swap in the clear.
 
 **Physical coercion.** encino has no duress passphrase or deniable volume. If
 you can be compelled to reveal the passphrase, the documents are revealed.
