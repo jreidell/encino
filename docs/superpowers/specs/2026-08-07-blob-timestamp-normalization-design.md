@@ -161,12 +161,11 @@ unusual network share, a read-only mount — must not fail the import. The
 document is correctly and durably stored either way; the timestamp is a privacy
 property, not a correctness one.
 
-The risk this accepts is silent non-delivery, covered by tests asserting
-normalization on an ordinary filesystem rather than by a runtime check.
-
-A `verify` check for un-normalized blobs was considered and rejected: it gives a
-real guarantee but adds a way for `verify` to report problems on filesystems
-where nothing is actually wrong.
+The risk this accepts is silent non-delivery, and it is the reason `verify`
+reports any blob left carrying a real timestamp. Every other property here fails
+loudly at the time; this one can simply not happen, so it needs something that
+looks. On a filesystem that cannot set times that report is correct rather than
+noise — the privacy property genuinely is not held.
 
 ## Testing
 
@@ -188,11 +187,6 @@ No `format_version` bump. Timestamps are not part of the on-disk format and a
 version 1 reader never consults them.
 
 ## What stays open
-
-**Existing vaults are not migrated.** Blobs written before this keep their
-original timestamps until they are rewritten in the normal course of editing. A
-one-shot normalization pass is easy to add later; smuggling a write into session
-open is not worth it.
 
 **The document count remains visible**, for the reasons above. It stays on the
 reserved list in `format.md`.

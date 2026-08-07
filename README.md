@@ -464,6 +464,13 @@ Authenticates every stored document against the index: confirms each blob is
 present, its key unwraps, it decrypts, and its digest matches what was recorded.
 Also reports stored blobs no document refers to.
 
+It additionally reports any blob left carrying a real timestamp. Blob times are
+normalized so the store cannot say when each document last changed, but setting
+them is best-effort — a filesystem that refuses does not fail the import, which
+makes this the one property here that can go missing without anything appearing
+to go wrong at the time. That report means the privacy property is absent, not
+that a document is damaged.
+
 Reads everything in the vault, so it takes time proportional to total size.
 Exits `1` if anything is wrong.
 
@@ -615,7 +622,7 @@ about 100 KB per binary and removes the failure mode entirely.
 Windows and Linux, from the same source. macOS should work — it takes the Unix
 paths throughout — but has not been tested.
 
-Everything is verified on both: 218 tests on Windows, 212 on Linux. The
+Everything is verified on both: 219 tests on Windows, 213 on Linux. The
 difference is not coverage but platform: the Windows-only tests cover named
 pipes and SIDs, the Linux-only ones file permissions, socket paths, and the
 peer-credential check on an accepted connection.

@@ -234,7 +234,7 @@ mod tests {
                 "{attempt:?} should have been refused"
             );
         }
-        assert!(DocPath::new("notes/.encino-migration.txt").is_ok());
+        assert!(DocPath::new("notes/.encino-notes.txt").is_ok());
     }
 
     #[test]

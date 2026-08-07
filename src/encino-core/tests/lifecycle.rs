@@ -296,8 +296,14 @@ fn verify_passes_on_a_healthy_vault_and_reports_tampering() {
     raw[last] ^= 0x01;
     std::fs::write(&blob_path, &raw).unwrap();
 
+    // Rewriting the file moved its mtime, which `verify` now reports in its own
+    // right. Put it back so this test stays about ciphertext tampering; the
+    // timestamp check has a test of its own.
+    let stamp = filetime::FileTime::from_unix_time(encino_core::fsutil::NORMALIZED_UNIX_TIME, 0);
+    filetime::set_file_times(&blob_path, stamp, stamp).unwrap();
+
     let issues = fixture.session().verify().unwrap();
-    assert_eq!(issues.len(), 1);
+    assert_eq!(issues.len(), 1, "expected only the tampering issue, got {issues:?}");
     assert_eq!(issues[0].document.as_ref().unwrap().as_str(), "a.pdf");
 }
 
@@ -359,6 +365,31 @@ fn stored_blobs(fixture: &Fixture) -> usize {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+#[test]
+fn verify_reports_a_blob_left_carrying_a_real_timestamp() {
+    let fixture = Fixture::new();
+    fixture.add("statement.pdf", b"closing balance 4102.55");
+
+    let name = DocPath::new("statement.pdf").unwrap();
+    let entry = fixture.session().get(&name).unwrap().clone();
+    let blob = entry.blob_id.path_under(&fixture.blobs_dir());
+
+    // Exactly what a filesystem that quietly refused the timestamp set would
+    // leave behind: a blob naming when its document last changed. Setting it is
+    // best-effort, so without this check nothing would ever say so.
+    let real = filetime::FileTime::from_unix_time(1_786_000_000, 0);
+    filetime::set_file_times(&blob, real, real).unwrap();
+
+    let issues = fixture.session().verify().unwrap();
+    assert_eq!(issues.len(), 1, "expected exactly one issue, got {issues:?}");
+    assert_eq!(issues[0].document.as_ref().unwrap(), &name);
+    assert!(
+        issues[0].problem.contains("timestamp"),
+        "the report should name the problem plainly: {}",
+        issues[0].problem
+    );
 }
 
 #[test]

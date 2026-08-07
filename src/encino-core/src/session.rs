@@ -388,6 +388,17 @@ impl Session {
                 }
             };
 
+            // A privacy property rather than a correctness one, and the only one
+            // here that can fail silently: stamping a blob is best-effort, so a
+            // filesystem that refused would leave the store saying when each
+            // document last changed with nothing to report it.
+            if !fsutil::is_normalized(&blob_path) {
+                issues.push(VerifyIssue {
+                    document: Some(entry.path.clone()),
+                    problem: "its stored file carries a real timestamp, which reveals when the document last changed".into(),
+                });
+            }
+
             match blob::read_blob(&blob_path, &mut std::io::sink(), &entry.blob_id, &content_key) {
                 Ok(stats) if entry.matches(&stats) => {}
                 Ok(stats) => issues.push(VerifyIssue {

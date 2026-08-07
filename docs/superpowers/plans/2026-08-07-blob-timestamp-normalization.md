@@ -467,7 +467,7 @@ Across the snapshots a backup accumulates, that is a per-document activity
 timeline available without any credential.
 
 This is a property of what encino writes, not of the format: a version 1 reader
-never consults a timestamp, and a vault whose blobs predate this simply carries
+never consults a timestamp. `encino verify` reports any blob left carrying
 the times it was given.
 
 **On Unix, ctime is not covered**, because no userspace call can set it — and
@@ -587,9 +587,8 @@ git commit -m "Document blob timestamp normalization and its ctime limit"
 | ctime not closed on Unix | 5 (documented in all three docs) |
 | Best-effort, non-fatal | 1 (`normalize_times` returns `()`; test covers a missing path) |
 | Tests: constant, identical mtimes, shard on write and remove, lifecycle | 2, 3, 4 |
-| `verify` check rejected | not implemented, by decision |
+| `verify` reports a blob left with a real timestamp | added after review |
 | No `format_version` bump | Global Constraints; no version touched |
-| No migration of existing vaults | documented in 5 step 1 |
 
 **Placeholder scan:** none — every step carries the literal code or command.
 

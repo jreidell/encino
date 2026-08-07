@@ -41,8 +41,9 @@ const CALIBRATION_MEMORY_CEILING_KIB: u32 = 256 * 1024;
 /// Iterations are raised only until here; beyond it the wait outweighs the gain.
 const CALIBRATION_ITERATION_CEILING: u32 = 10;
 
-/// Argon2id parameters, recorded in `vault.json` rather than hardcoded so a future
-/// build can raise its defaults and still open vaults created today.
+/// Argon2id parameters, recorded in `vault.json` rather than hardcoded. The cost
+/// that opens a vault must be the cost that created it, so it belongs to the vault
+/// rather than to the build — which is what allows the defaults to be raised.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KdfConfig {
     /// Always `argon2id` in format version 1.

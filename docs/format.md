@@ -35,7 +35,8 @@ the root is, by definition, currently decrypted.
 
 Plaintext, and intentionally so. It holds only KDF parameters, salts, and wrapped
 key blobs, none of which are secret; keeping it readable means a vault can be
-diagnosed and migrated without the passphrase.
+inspected without the passphrase — which algorithm protects it, at what cost,
+and how many credentials can open it.
 
 ```jsonc
 {
@@ -58,8 +59,11 @@ diagnosed and migrated without the passphrase.
 
 `kdf` parameters are calibrated at `init` to roughly one second on the machine
 that created the vault, floored at the OWASP minimum of 19 MiB and two
-iterations. They are stored rather than hardcoded so a future build can raise the
-defaults without being unable to open existing vaults.
+iterations. They are stored rather than hardcoded because the cost that opens a
+vault must be the cost that created it — a binary carrying a different hardcoded
+figure would derive a different key and open nothing. Recording them makes the
+cost a property of the vault rather than of the build, which is what allows the
+defaults to be raised at all.
 
 Each entry in `wraps` is an independent encryption of the same 32-byte master
 key. Each carries its own 16-byte salt and 24-byte nonce. `kind` is a hint for
@@ -221,8 +225,12 @@ Across the snapshots a backup accumulates, that is a per-document activity
 timeline available without any credential.
 
 This is a property of what encino writes rather than of the format: a version 1
-reader never consults a timestamp, and a vault whose blobs predate this simply
-carries the times it was given.
+reader never consults a timestamp.
+
+Setting it is best-effort, since a filesystem that refuses must not fail an
+import. That makes it the one property here that can be absent without anything
+going wrong at the time, so `encino verify` reports any blob left carrying a
+real timestamp.
 
 **On Unix, ctime is not covered**, because no userspace call can set it — and
 setting mtime updates it. An attacker reading the raw filesystem still sees when

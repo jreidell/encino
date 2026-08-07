@@ -11,7 +11,8 @@ use crate::keyring::{self, KdfConfig, KeyWrap, RecoveryCode, WrapKind};
 use crate::{Error, FORMAT_VERSION, Result, VAULT_DIR, fsutil};
 
 /// Contents of `vault.json`. Plaintext by design: only KDF parameters, salts and
-/// wrapped key material, none of which are secret, so a vault stays migratable.
+/// wrapped key material, none of which are secret, so a vault can be inspected
+/// without the passphrase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultMeta {
     /// On-disk format version.

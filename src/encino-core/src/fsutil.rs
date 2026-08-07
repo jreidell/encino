@@ -65,6 +65,21 @@ pub fn normalize_times(path: &Path) {
     let _ = filetime::set_file_times(path, stamp, stamp);
 }
 
+/// Whether a path still carries [`NORMALIZED_UNIX_TIME`].
+///
+/// [`normalize_times`] is best-effort, so a filesystem that quietly refused the
+/// change would leave the blob store naming when each document last changed and
+/// nothing else would report it. `verify` uses this to say so.
+///
+/// Modification time only. Reading a blob updates its access time — `verify`
+/// itself does exactly that — so testing atime would report every vault on a
+/// filesystem that tracks it.
+pub fn is_normalized(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|m| filetime::FileTime::from_last_modification_time(&m).unix_seconds() == NORMALIZED_UNIX_TIME)
+        .unwrap_or(false)
+}
+
 /// Replace a file's contents atomically: a flushed temporary sibling renamed
 /// over the target, so a crash leaves old or new contents, never a truncation.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
