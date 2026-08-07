@@ -95,12 +95,36 @@ pub fn remove_dir_if_empty(path: &Path) {
 }
 
 /// Delete a blob file. Ciphertext, so no scrubbing is warranted.
+///
+/// Tidies the shard afterwards, in two respects.
+///
+/// An emptied shard directory is removed. Left standing it would record that a
+/// document once lived there — outliving the document itself, and accumulating
+/// as edits replace blobs — so the store would slowly reveal more than it holds.
+/// A shard still holding a blob is kept, since `remove_dir` refuses a directory
+/// that is not empty, which is the guard rather than a separate check.
+///
+/// Whichever happened, timestamps are restamped: deleting a blob moves its
+/// shard's mtime just as writing one does, and removing the shard moves the
+/// store root's. Without this a check-in — which writes a new blob and drops the
+/// old — would restore the per-document timeline the write path removes.
 pub fn remove_blob(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Error::io("delete blob", path, e)),
+    let removed = match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(Error::io("delete blob", path, e)),
+    };
+
+    if removed && let Some(shard) = path.parent() {
+        remove_dir_if_empty(shard);
+        if shard.exists() {
+            crate::fsutil::normalize_times(shard);
+        }
+        if let Some(root) = shard.parent() {
+            crate::fsutil::normalize_times(root);
+        }
     }
+    Ok(())
 }
 
 /// Whether a path exists as a regular file.
@@ -233,6 +257,41 @@ mod tests {
 
         assert!(!empty.exists());
         assert!(populated.exists(), "a directory the user put something in must be left alone");
+    }
+
+    #[test]
+    fn emptying_a_shard_removes_it_and_leaves_the_store_root_normalized() {
+        use crate::blob::{BlobId, write_blob};
+        use crate::crypto::Key;
+
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let shard = blobs.join("aa");
+        let key = Key::random();
+
+        // Two blobs sharing one shard, written to explicit paths so the shard is
+        // not left to the randomness of a blob id.
+        let (first, second) = (shard.join("first"), shard.join("second"));
+        write_blob(&mut &b"one"[..], &first, &BlobId::random(), &key).unwrap();
+        write_blob(&mut &b"two"[..], &second, &BlobId::random(), &key).unwrap();
+
+        // While a blob remains, the shard stays and keeps the fixed time.
+        remove_blob(&first).unwrap();
+        assert!(shard.is_dir(), "a shard still holding a blob must not be removed");
+        assert_eq!(mtime_seconds(&shard), crate::fsutil::NORMALIZED_UNIX_TIME);
+
+        // Emptied, it goes: a shard left standing records that a document was
+        // once there, which outlives the document itself.
+        remove_blob(&second).unwrap();
+        assert!(!shard.exists(), "an emptied shard directory was left behind");
+
+        // Removing it moved the store root's mtime, so that needs restamping too.
+        assert_eq!(mtime_seconds(&blobs), crate::fsutil::NORMALIZED_UNIX_TIME);
+    }
+
+    /// Modification time of a path, in Unix seconds.
+    fn mtime_seconds(path: &Path) -> i64 {
+        filetime::FileTime::from_last_modification_time(&fs::metadata(path).unwrap()).unix_seconds()
     }
 
     #[test]

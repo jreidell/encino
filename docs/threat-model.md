@@ -22,7 +22,7 @@ disk.
 | Folder and subfolder structure | Yes — the blob store is flat |
 | Document count | **No** — the number of blobs is visible |
 | Document sizes | Partly — padded to a bucket, so only the bucket shows |
-| Access times | **No** — filesystem timestamps on blobs are visible |
+| Access times | Mostly — blob timestamps are normalized; Unix `ctime` is not settable |
 
 Sizes are padded with Padmé, floored at 4 KiB: every document under 4 KiB is
 exactly the same size on disk, and above that the padding costs at most 12% and
@@ -30,9 +30,15 @@ leaves roughly `log log n` bits of the size visible. That is enough to tell a
 note from a scan, and not enough to confirm a specific document by its size —
 which is the attack that mattered. See `format.md` for the construction.
 
-The count and the access times remain visible, and are recorded in `format.md`
-as candidates for a future revision. Hiding the count needs decoy blobs, which
-carry an ongoing storage cost rather than a one-off one.
+Blob timestamps are normalized to a fixed value, so the blob store no longer
+says when each document last changed. On Unix the inode change time remains,
+since no userspace call can set it; it is absent from every backup and archive
+format, so what it exposes is raw filesystem access rather than a leaked copy.
+See `format.md` for the detail.
+
+The count remains visible, and is recorded in `format.md` as a candidate for a
+future revision. Hiding it needs decoy blobs, which carry an ongoing storage cost
+rather than a one-off one.
 
 ## In scope — attacks encino defends against
 
@@ -46,8 +52,19 @@ checkout: a design that decrypts the whole folder would leak plaintext revisions
 into a sync provider's version history, where the user cannot delete them.
 
 **Another account on the same machine.** Blobs carry no filenames and the index
-is sealed. The session agent's pipe is ACL'd to the owning user's SID and the
-agent verifies the identity of connecting clients.
+is sealed. The session agent is reachable only by the account that started it,
+enforced twice on each platform so that neither mechanism is load-bearing alone:
+
+- **Windows** — the pipe's security descriptor grants access to the owning SID
+  and nothing else (`D:P(A;;GA;;;<sid>)`, protected so no inherited entry can
+  widen it), and `PIPE_REJECT_REMOTE_CLIENTS` refuses connections over the
+  network.
+- **Linux** — the socket is 0600 inside a 0700 directory this process has
+  verified it owns, and each accepted connection's `SO_PEERCRED` uid is checked
+  against our own before the request is read.
+
+On other Unix systems the directory mode stands alone, since `SO_PEERCRED` is
+Linux-specific. macOS is untested; `getpeereid` is what it would want.
 
 **Casual inspection.** Someone who opens the folder while it is locked sees an
 empty directory and a `.encino` folder of opaque blobs.

@@ -325,6 +325,111 @@ fn verify_reports_missing_and_orphaned_ciphertext() {
 }
 
 #[test]
+fn a_name_colliding_only_by_case_is_refused_before_any_ciphertext_is_written() {
+    let fixture = Fixture::new();
+    fixture.add("w2.pdf", b"wages and withholding");
+    let before = stored_blobs(&fixture);
+
+    let source = fixture.stage_file("W2.pdf", b"a different document entirely");
+    let mut session = fixture.session();
+    let refused = session.add(&source, &DocPath::new("W2.pdf").unwrap(), false);
+
+    assert!(matches!(refused, Err(Error::DuplicateDocument(_))), "got {refused:?}");
+
+    // The refusal used to happen inside the index, by which point a blob and a
+    // journal record already existed and the next session had to reconcile them
+    // away. Nothing should have been written at all.
+    assert_eq!(stored_blobs(&fixture), before, "a blob was written for a document that was refused");
+    assert!(fixture.journal().is_clean().unwrap(), "a journal record was left behind by a refused import");
+
+    // And the original is untouched, since nothing was imported to replace it.
+    assert!(source.exists(), "the source of a refused import must not be shredded");
+}
+
+/// How many blob files the store holds, across every shard.
+fn stored_blobs(fixture: &Fixture) -> usize {
+    let root = fixture.blobs_dir();
+    std::fs::read_dir(&root)
+        .map(|shards| {
+            shards
+                .flatten()
+                .filter(|shard| shard.path().is_dir())
+                .filter_map(|shard| std::fs::read_dir(shard.path()).ok())
+                .map(|files| files.flatten().count())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn blob_timestamps_do_not_reveal_which_document_changed() {
+    let fixture = Fixture::new();
+    fixture.add("a.pdf", b"first document");
+    fixture.add("b.pdf", b"second document");
+    fixture.add("c.pdf", b"third document");
+
+    // Edit exactly one, which is what made the leak legible: two blobs shared a
+    // timestamp and the edited one stood seconds apart.
+    let name = DocPath::new("a.pdf").unwrap();
+    let mut session = fixture.session();
+    let path = session.checkout(&name).unwrap();
+    std::fs::write(&path, b"first document, after editing").unwrap();
+    session.checkin(&name).unwrap();
+    drop(session);
+
+    // The superseded blob's shard must not outlive it. An emptied shard left
+    // standing records that a document was once there, and they accumulate with
+    // every edit.
+    let shards: Vec<_> = std::fs::read_dir(fixture.blobs_dir())
+        .unwrap()
+        .flatten()
+        .map(|s| s.path())
+        .filter(|s| s.is_dir())
+        .collect();
+    for shard in &shards {
+        assert!(
+            std::fs::read_dir(shard).unwrap().next().is_some(),
+            "{shard:?} is an empty shard left behind by a check-in"
+        );
+    }
+
+    let times = blob_mtimes(&fixture.blobs_dir());
+    assert_eq!(times.len(), 3, "expected one blob per document, got {}", times.len());
+
+    let distinct: std::collections::HashSet<(i64, u32)> = times.into_iter().collect();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "blob mtimes differ, which says which document changed and when: {distinct:?}"
+    );
+    assert_eq!(
+        distinct.into_iter().next().unwrap(),
+        (encino_core::fsutil::NORMALIZED_UNIX_TIME, 0),
+        "blobs agree on a timestamp, but it is a real one rather than the fixed one"
+    );
+}
+
+/// Modification time of every blob in the store, to full precision.
+///
+/// Seconds alone would make the assertion above vacuous: this test writes and
+/// edits well inside one second, so truncated timestamps would agree whether or
+/// not anything normalized them.
+fn blob_mtimes(blobs_dir: &Path) -> Vec<(i64, u32)> {
+    let mut out = Vec::new();
+    for shard in std::fs::read_dir(blobs_dir).unwrap().flatten() {
+        if !shard.path().is_dir() {
+            continue;
+        }
+        for blob in std::fs::read_dir(shard.path()).unwrap().flatten() {
+            let metadata = std::fs::metadata(blob.path()).unwrap();
+            let at = filetime::FileTime::from_last_modification_time(&metadata);
+            out.push((at.unix_seconds(), at.nanoseconds()));
+        }
+    }
+    out
+}
+
+#[test]
 fn export_reproduces_the_original_tree() {
     let fixture = Fixture::new();
     fixture.add("taxes/2024/w2.pdf", b"wages and withholding");

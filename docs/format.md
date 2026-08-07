@@ -21,6 +21,8 @@ base64 (standard alphabet, padded).
         0f3a91c7…          one encrypted document
     journal\
       <op-id>.json        in-flight operation records
+    staging\
+      <op-id>             plaintext being assembled by a checkout (see below)
     work.lock             held open for the life of a session (see below)
   <checked-out documents appear here as plaintext>
 ```
@@ -207,6 +209,38 @@ A reader must also check that the chunks decrypt to exactly
 authenticated length and never read from the file: a padding length the file
 could choose is a padding length an attacker chooses.
 
+### Timestamps
+
+Every blob, every shard directory, and `blobs/` itself carries a fixed
+modification and access time of `2001-01-01T00:00:00Z`.
+
+A blob is written once and never modified — an edited document is stored under a
+fresh random id — so without this a blob's mtime is exactly when that document
+last changed, and a shard's mtime is when one of its documents last changed.
+Across the snapshots a backup accumulates, that is a per-document activity
+timeline available without any credential.
+
+This is a property of what encino writes rather than of the format: a version 1
+reader never consults a timestamp, and a vault whose blobs predate this simply
+carries the times it was given.
+
+**On Unix, ctime is not covered**, because no userspace call can set it — and
+setting mtime updates it. An attacker reading the raw filesystem still sees when
+each blob was written. What this does cover is every backup and archive format,
+none of which carry ctime, which is precisely the case where a timeline
+accumulates over repeated copies.
+
+A shard directory emptied by a deletion is removed rather than left standing.
+An empty shard records that a document once lived there, which outlives the
+document and accumulates as edits replace blobs, so the store would gradually
+disclose more than it holds. Shards are recreated on demand, so a reader must
+not assume any particular shard exists.
+
+`index.enc` and `vault.json` are deliberately excluded. They are replaced in
+place, keeping their names and sometimes their sizes, so a tool deciding what to
+copy from name, size and mtime could silently skip a changed index — and the
+index is the one file whose loss loses every document.
+
 ## index.enc
 
 A single AEAD-sealed JSON document. Because logical paths exist only here, both
@@ -240,6 +274,11 @@ Plaintext:
 
 Index associated data is `"ENCINOI1" ‖ vault_id`, which prevents an index from one
 vault being substituted into another.
+
+`modified` and `added` are RFC 3339. The example above is rounded for legibility;
+real values carry whatever sub-second precision the source timestamp had, as in
+`2026-08-07T08:33:20.551008Z`. A reader must accept a fractional part, and a
+writer may emit one. `encino ls --json` reports both fields in the same form.
 
 Each `wrapped_key` is the document's content key sealed under the
 blob-key-wrapping key, with associated data binding it to the blob it decrypts:
@@ -280,6 +319,23 @@ state once its new state is durable.** Checkout fsyncs the plaintext before
 clearing the journal entry; check-in fsyncs the new blob before shredding the
 plaintext.
 
+## staging
+
+Scratch space for a checkout in progress. A document is decrypted to
+`staging\<op-id>`, checked against the size and digest recorded in the index,
+and only then renamed into the work area. A failure anywhere in that sequence
+leaves a partial file here rather than one in the work area that looks whole,
+and the partial is shredded rather than unlinked, since it holds plaintext.
+
+Staging sits inside `.encino` so that it shares a volume with its destination,
+which is what makes the final move an atomic rename rather than a copy.
+
+Two further transient names appear and disappear inside `.encino`: files
+matching `.<name>.<random>.tmp` are the write-then-rename siblings used to
+replace `vault.json`, `index.enc`, and journal records atomically. Neither these
+nor staging files are left behind deliberately; anything found in either place
+is debris from an interrupted run.
+
 ## work.lock
 
 Grants one session exclusive access to a vault, held open for the session's
@@ -319,8 +375,6 @@ Changes requiring a `format_version` bump:
 - **Hiding the document count.** Padding hides how large each document is, but
   the number of blobs is still a directory listing away. Closing that needs
   decoy blobs, whose cost is ongoing rather than one-off.
-- **Hiding access times.** Filesystem timestamps on blobs reveal when a document
-  was last checked in.
 - **Additional key wraps.** The `wraps` array is already a list, so adding a
   TPM- or Windows-Hello-sealed entry is additive and may not need a bump.
 - **Compression** before encryption. Not in v1: compressing before encrypting

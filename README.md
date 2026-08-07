@@ -615,18 +615,21 @@ about 100 KB per binary and removes the failure mode entirely.
 Windows and Linux, from the same source. macOS should work — it takes the Unix
 paths throughout — but has not been tested.
 
-Everything is verified on both: 206 tests on Windows, 202 on Linux. The
+Everything is verified on both: 218 tests on Windows, 212 on Linux. The
 difference is not coverage but platform: the Windows-only tests cover named
-pipes and SIDs, the Linux-only ones file permissions and socket paths.
+pipes and SIDs, the Linux-only ones file permissions, socket paths, and the
+peer-credential check on an accepted connection.
 
-The platform differences are confined to three things, and each takes the same
-shape on both systems:
+The platform differences are confined to these, and each takes the same shape on
+both systems:
 
 | | Windows | Unix |
 |---|---|---|
 | Vault lock | file opened denying write sharing | `flock(LOCK_EX \| LOCK_NB)` |
-| Agent transport | named pipe, DACL'd to your SID | Unix socket, `0600` in a `0700` directory |
+| Agent transport | named pipe, DACL'd to your SID | `0600` socket in a `0700` directory |
+| Who may connect | the DACL, plus remote clients refused | the directory, plus `SO_PEERCRED` on Linux |
 | Key kept out of swap | `VirtualLock` | `mlock` |
+| Blob timestamps | normalized, creation time included | normalized; `ctime` not settable |
 
 The lock relies on the same property on both: it is a *held handle*, so the
 kernel releases it when the process dies and there are no stale locks to clear.
@@ -669,6 +672,12 @@ a malicious *new* release of a dependency cannot reach you. The gap that leaves
 is the reverse — an advisory filed against a version already pinned, which
 nothing surfaces by itself. Treat `cargo update` as the step that deserves
 attention, since it is the only thing that moves you off known-good pins.
+
+A third job builds against the `rust-version` in `Cargo.toml` — currently 1.88 —
+which it reads from the manifest rather than repeating, so the two cannot drift.
+Every other job runs on stable, so without it that number would never be
+exercised and would quietly become fiction the first time a dependency raised
+the real floor.
 
 Linux is a supported target rather than an aspiration, and is tested from
 Windows through WSL. `CARGO_TARGET_DIR` must point outside the mount, both

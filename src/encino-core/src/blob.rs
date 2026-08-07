@@ -244,6 +244,19 @@ pub fn write_blob<R: Read>(source: &mut R, dest: &Path, id: &BlobId, key: &Key) 
     write_header(&mut file, CHUNK_SIZE as u32, index, size)
         .map_err(|e| Error::io("finalize blob header", dest, e))?;
     file.sync_all().map_err(|e| Error::io("flush blob to disk", dest, e))?;
+    // Closed before its times are set: Windows is happier stamping a file that
+    // nothing holds open.
+    drop(file);
+
+    // The blob, its shard, and the store root. Writing the blob moved all three,
+    // and a shard's mtime alone would still say when a document changed.
+    crate::fsutil::normalize_times(dest);
+    if let Some(shard) = dest.parent() {
+        crate::fsutil::normalize_times(shard);
+        if let Some(root) = shard.parent() {
+            crate::fsutil::normalize_times(root);
+        }
+    }
 
     Ok(BlobStats { size, sha256: digest.finish() })
 }
@@ -408,6 +421,52 @@ mod tests {
         let path = dir.path().join("blob");
         write_blob(&mut &content[..], &path, &BlobId::random(), &Key::random()).unwrap();
         std::fs::metadata(&path).unwrap().len()
+    }
+
+    /// Modification time of a path, in Unix seconds.
+    fn mtime_of(path: &Path) -> i64 {
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap()).unix_seconds()
+    }
+
+    #[test]
+    fn a_written_blob_and_its_directories_carry_the_normalized_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let id = BlobId::random();
+        let path = id.path_under(&blobs);
+
+        write_blob(&mut &b"statement"[..], &path, &id, &Key::random()).unwrap();
+
+        // The blob itself, its shard, and the store root: a shard directory's
+        // mtime moves whenever a blob lands in it, and with 256 shards that is
+        // nearly per-document granularity on its own.
+        for target in [path.clone(), path.parent().unwrap().to_path_buf(), blobs.clone()] {
+            assert_eq!(
+                mtime_of(&target),
+                crate::fsutil::NORMALIZED_UNIX_TIME,
+                "{target:?} was left with a real timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn two_blobs_written_at_different_times_are_indistinguishable() {
+        // The observed leak: documents imported together and one edited later
+        // showed three distinct mtimes, which is an activity timeline.
+        let dir = tempfile::tempdir().unwrap();
+        let key = Key::random();
+
+        let (first_id, second_id) = (BlobId::random(), BlobId::random());
+        let first = first_id.path_under(dir.path());
+        let second = second_id.path_under(dir.path());
+
+        write_blob(&mut &b"one"[..], &first, &first_id, &key).unwrap();
+        write_blob(&mut &b"two"[..], &second, &second_id, &key).unwrap();
+
+        assert_eq!(mtime_of(&first), mtime_of(&second));
+        // Asserted against the constant too, so this cannot pass merely because
+        // a coarse filesystem gave both the same real time.
+        assert_eq!(mtime_of(&first), crate::fsutil::NORMALIZED_UNIX_TIME);
     }
 
     #[test]

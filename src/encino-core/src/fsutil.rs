@@ -38,6 +38,33 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// The timestamp every blob and blob-store directory carries.
+///
+/// `2001-01-01T00:00:00Z`. A constant rather than the vault's creation time,
+/// which would vary per vault for no gain, and not the Unix epoch, which some
+/// backup tools read as a missing or damaged timestamp.
+pub const NORMALIZED_UNIX_TIME: i64 = 978_307_200;
+
+/// Stamp a file or directory with [`NORMALIZED_UNIX_TIME`].
+///
+/// A blob is written once and never modified — an edited document is stored
+/// under a fresh random id — so its mtime would otherwise be exactly when that
+/// document last changed. Across the snapshots a backup accumulates, that is a
+/// per-document activity timeline readable with no credential at all.
+///
+/// Deliberately best-effort and infallible. A filesystem that refuses the change
+/// must not fail an import: the document is durably stored either way, and the
+/// timestamp is a privacy property rather than a correctness one.
+///
+/// Not for `index.enc` or `vault.json`. Those are replaced in place, keeping
+/// their names and sometimes their sizes, so a backup tool deciding what to copy
+/// from name, size and mtime could silently skip a changed index — and losing
+/// the index loses every document.
+pub fn normalize_times(path: &Path) {
+    let stamp = filetime::FileTime::from_unix_time(NORMALIZED_UNIX_TIME, 0);
+    let _ = filetime::set_file_times(path, stamp, stamp);
+}
+
 /// Replace a file's contents atomically: a flushed temporary sibling renamed
 /// over the target, so a crash leaves old or new contents, never a truncation.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
@@ -187,6 +214,32 @@ mod tests {
         let device = r"\\?\Volume{12345678-0000-0000-0000-000000000000}\x";
         assert_eq!(strip_verbatim_prefix(Path::new(device)), PathBuf::from(device));
         assert_eq!(strip_verbatim_prefix(Path::new(r"C:\Docs")), PathBuf::from(r"C:\Docs"));
+    }
+
+    #[test]
+    fn normalizing_sets_a_fixed_time_on_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("blob");
+        fs::write(&file, b"contents").unwrap();
+
+        normalize_times(&file);
+        normalize_times(dir.path());
+
+        for path in [file.clone(), dir.path().to_path_buf()] {
+            let stamped = filetime::FileTime::from_last_modification_time(&fs::metadata(&path).unwrap());
+            assert_eq!(
+                stamped.unix_seconds(),
+                NORMALIZED_UNIX_TIME,
+                "{path:?} did not take the normalized time"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizing_a_path_that_is_not_there_is_silent() {
+        // Best-effort by design: a filesystem that refuses must not fail an import.
+        let dir = tempfile::tempdir().unwrap();
+        normalize_times(&dir.path().join("never-existed"));
     }
 
     #[test]
