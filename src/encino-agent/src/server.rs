@@ -267,8 +267,22 @@ fn run(vault: PathBuf, vault_id: &str, key: Vec<u8>, timeout: Duration) -> Resul
     Ok(())
 }
 
+/// How long one client is given to state its business.
+///
+/// Requests are a single JSON line written immediately after connecting, so this
+/// is generous. It exists because the accept loop serves connections in turn: a
+/// client that attaches and then says nothing would otherwise hold the agent for
+/// every other command. Same-user code can already do worse, but a bounded wait
+/// costs nothing.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(windows)]
 fn serve_one(agent: &Agent, connection: pipe::PipeConnection) {
+    // `ReadFile` on a blocking instance has no deadline of its own.
+    if !connection.wait_for_request(REQUEST_TIMEOUT) {
+        return;
+    }
+
     let mut reader = BufReader::new(&connection);
     let mut line = String::new();
 
@@ -365,6 +379,18 @@ fn run(vault: PathBuf, vault_id: &str, key: Vec<u8>, timeout: Duration) -> Resul
 /// Serve one request; identical to the Windows path but for the stream type.
 #[cfg(unix)]
 fn serve_one(agent: &Agent, stream: std::os::unix::net::UnixStream) {
+    // The socket's directory already keeps other accounts out. Asking the kernel
+    // who is actually on the far end is a second, independent answer.
+    if !crate::unix::peer_is_this_user(&stream) {
+        crate::diag::record("refused a connection from another user");
+        return;
+    }
+
+    // The counterpart to the Windows peek: a client that connects and says
+    // nothing must not hold the accept loop.
+    let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
+
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
 

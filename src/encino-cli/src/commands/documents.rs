@@ -130,28 +130,36 @@ fn collect(argument: &Path, vault_root: &Path, out: &mut Vec<Import>) -> Result<
 }
 
 /// Walk one path, naming everything found relative to `base`.
+///
+/// Iterative rather than recursive: directory depth is whatever the filesystem
+/// allows, and a deep tree should be slow to import rather than overflow the
+/// stack partway through.
 fn gather(path: &Path, base: &Path, vault_root: &Path, out: &mut Vec<Import>) -> Result<()> {
-    if path.is_file() {
-        let (name, inside_vault) = match path.strip_prefix(vault_root) {
-            Ok(relative) => (DocPath::from_relative(relative)?, true),
-            Err(_) => {
-                let relative = path.strip_prefix(base).unwrap_or(path);
-                (DocPath::from_relative(relative)?, false)
-            }
-        };
-        out.push(Import { source: path.to_path_buf(), name, inside_vault });
-        return Ok(());
-    }
+    let mut pending = vec![path.to_path_buf()];
 
-    if path.is_dir() {
-        // Never walk into the vault's own storage.
-        if path.file_name().map(|n| n == encino_core::VAULT_DIR).unwrap_or(false) {
-            return Ok(());
+    while let Some(path) = pending.pop() {
+        if path.is_file() {
+            let (name, inside_vault) = match path.strip_prefix(vault_root) {
+                Ok(relative) => (DocPath::from_relative(relative)?, true),
+                Err(_) => {
+                    let relative = path.strip_prefix(base).unwrap_or(&path);
+                    (DocPath::from_relative(relative)?, false)
+                }
+            };
+            out.push(Import { source: path, name, inside_vault });
+            continue;
         }
-        let listing =
-            std::fs::read_dir(path).with_context(|| format!("could not read {}", path.display()))?;
-        for item in listing {
-            gather(&item?.path(), base, vault_root, out)?;
+
+        if path.is_dir() {
+            // Never walk into the vault's own storage.
+            if path.file_name().map(|n| n == encino_core::VAULT_DIR).unwrap_or(false) {
+                continue;
+            }
+            let listing =
+                std::fs::read_dir(&path).with_context(|| format!("could not read {}", path.display()))?;
+            for item in listing {
+                pending.push(item?.path());
+            }
         }
     }
     Ok(())
@@ -169,8 +177,8 @@ pub fn list(root: &Path, json: bool) -> Result<()> {
                     "path": d.path.as_str(),
                     "size": d.size,
                     "sha256": d.sha256,
-                    "modified": d.modified.to_string(),
-                    "added": d.added.to_string(),
+                    "modified": rfc3339(d.modified),
+                    "added": rfc3339(d.added),
                     "open": session.is_open(&d.path),
                 })
             })
@@ -351,15 +359,57 @@ pub fn export(root: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Hand a decrypted file to whatever normally opens it.
+///
+/// Deliberately not `cmd /C start`. Rust quotes an argument only when it holds a
+/// space, tab, or quote, while `cmd` reads `&`, `^`, `(`, `)` and `%` as syntax.
+/// A document named `a&calc&x.pdf` — which Windows allows on disk and [`DocPath`]
+/// permits — therefore reached `cmd` unquoted and ran `calc` instead of opening
+/// anything. Document names come from whoever produced the file, so that was
+/// attacker-controlled text arriving at a shell.
+///
+/// `explorer` resolves the same default-handler association with no shell in
+/// between. Its argument is pre-quoted through `raw_arg` because explorer parses
+/// its own command line rather than following the C runtime convention Rust's
+/// quoting targets, which leaves an unquoted path containing a comma ambiguous.
+#[cfg(windows)]
 fn launch_default_app(path: &Path) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", ""]).arg(path).spawn();
+    use std::os::windows::process::CommandExt;
+
+    match quoted_for_explorer(path) {
+        Some(argument) => {
+            let _ = std::process::Command::new("explorer").raw_arg(argument).spawn();
+        }
+        // Never silently: the document is decrypted and sitting there, so the
+        // user needs to know why nothing opened.
+        None => eprintln!("  (not launched: {} contains a quote)", path.display()),
     }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    }
+}
+
+/// Wrap a path in quotes for explorer, or refuse it.
+///
+/// Quoting is unambiguous only while the path holds no `"` of its own. Windows
+/// forbids one in a filename and [`DocPath`] rejects it, so this cannot happen —
+/// which is exactly why it is checked rather than assumed. Split out so the
+/// quoting is testable without launching anything.
+#[cfg(windows)]
+fn quoted_for_explorer(path: &Path) -> Option<String> {
+    let text = path.display().to_string();
+    if text.contains('"') { None } else { Some(format!("\"{text}\"")) }
+}
+
+/// No shell here either: `xdg-open` is executed directly with one argument.
+#[cfg(not(windows))]
+fn launch_default_app(path: &Path) {
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+/// Render a timestamp for `--json`.
+///
+/// The `time` crate's `Display` gives `2026-04-11 09:31:02.0 +00:00:00`, which is
+/// neither what the index stores nor something a JSON consumer can be expected to
+/// parse. Machine-readable output should be RFC 3339, matching the index.
+fn rfc3339(at: time::OffsetDateTime) -> String {
+    at.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| at.to_string())
 }
 
 /// Render a byte count for a human.
@@ -381,6 +431,37 @@ fn _assert_session_type(_: &Session) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_document_name_cannot_smuggle_shell_syntax_into_the_launcher() {
+        // `cmd /C start` ran `calc` for this name, because Rust quotes only
+        // arguments containing whitespace and `&` separates commands. The
+        // argument must arrive at explorer quoted, whole, and unparsed.
+        let argument = quoted_for_explorer(Path::new(r"E:\vault\a&calc&x.pdf")).unwrap();
+        assert_eq!(argument, "\"E:\\vault\\a&calc&x.pdf\"");
+        assert!(argument.starts_with('"') && argument.ends_with('"'));
+
+        // A path with a space was already quoted by Rust; it must stay quoted once.
+        assert_eq!(
+            quoted_for_explorer(Path::new(r"E:\my vault\w2.pdf")).unwrap(),
+            "\"E:\\my vault\\w2.pdf\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_would_break_the_quoting_is_refused_rather_than_passed_on() {
+        // Unreachable in practice — Windows forbids `"` in a filename — which is
+        // why it is checked rather than assumed.
+        assert!(quoted_for_explorer(Path::new("E:\\vault\\od\"d.pdf")).is_none());
+    }
+
+    #[test]
+    fn json_timestamps_are_rfc3339_like_the_index() {
+        let at = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        assert_eq!(rfc3339(at), "2023-11-14T22:13:20Z");
+    }
 
     #[test]
     fn sizes_read_naturally() {

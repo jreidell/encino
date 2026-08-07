@@ -169,8 +169,11 @@ impl Session {
     /// Import a file, encrypting it into the vault. Unless `keep_source` is set,
     /// the original is shredded once the ciphertext is durable and indexed.
     pub fn add(&mut self, source: &Path, name: &DocPath, keep_source: bool) -> Result<()> {
-        if self.index.contains(name) {
-            return Err(Error::DuplicateDocument(name.to_string()));
+        // The same rule `Index::insert` enforces, applied before any work: a name
+        // differing only by case reaches that check having already written a blob
+        // and a journal record, which the next session then has to reconcile away.
+        if let Some(existing) = self.index.colliding_path(name) {
+            return Err(Error::DuplicateDocument(existing.to_string()));
         }
 
         let metadata = std::fs::symlink_metadata(source).map_err(|e| Error::io("inspect", source, e))?;

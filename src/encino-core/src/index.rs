@@ -134,7 +134,10 @@ impl Index {
     }
 
     /// An existing name equal to `path`, or differing only by case.
-    fn colliding_path(&self, path: &DocPath) -> Option<&DocPath> {
+    ///
+    /// Public so a caller can refuse an import *before* writing its ciphertext.
+    /// [`Index::insert`] applies the same rule, but by then the blob exists.
+    pub fn colliding_path(&self, path: &DocPath) -> Option<&DocPath> {
         if let Some((existing, _)) = self.documents.get_key_value(path) {
             return Some(existing);
         }

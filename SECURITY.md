@@ -67,9 +67,10 @@ The dangerous surface is deliberately small and concentrated:
 - `src/encino-core/` — all cryptography, the index, the blob store, and the
   crash journal. Compiled with `#![forbid(unsafe_code)]` and performs no
   terminal I/O, so it can be exercised directly.
-- `src/encino-agent/src/win.rs` and `unix.rs` — every `unsafe` block in the
-  project, roughly 200 lines of platform calls. The least-tested part, and the
-  first place I would look.
+- `src/encino-agent/src/win.rs`, `unix.rs`, and `pipe.rs` — every `unsafe` block
+  in the project, and the only three files that contain one. Platform calls plus
+  the named-pipe lifecycle. `encino-cli` has no `unsafe` at all. This is the
+  least-tested part, and the first place I would look.
 
 Both are libraries compiled into the single `encino` executable; there is no
 separate daemon binary. The session daemon runs as a hidden `agent` subcommand

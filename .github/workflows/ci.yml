@@ -52,6 +52,34 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  msrv:
+    # `rust-version` in Cargo.toml is a promise about the oldest compiler that
+    # can build this. Every other job here runs on stable, so without this one
+    # the number is never exercised and quietly becomes fiction the first time a
+    # dependency bump raises the real floor.
+    #
+    # Checked rather than tested: building proves the language and dependency
+    # requirements are met, and the behaviour is identical on every toolchain.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read the declared minimum
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml declares rust-version = $version"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build with the declared minimum
+        run: cargo check --workspace --all-targets
+
   audit:
     # `Cargo.lock` is committed, so builds are pinned to exact versions and
     # hashes — which is what makes the "maintainer publishes a malicious new

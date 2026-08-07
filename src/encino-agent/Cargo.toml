@@ -6,8 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Library only. The `encino-agent` binary is declared by `encino-cli`, which
-# is what lets `cargo test` build it — see that crate's src/bin/encino-agent.rs.
+# Library only. There is no agent binary: the session daemon is a hidden `agent`
+# subcommand of the single `encino` executable declared by `encino-cli`, which is
+# also what lets `cargo test` build it — `cargo test` builds the binaries of the
+# package under test and no others.
 [lib]
 name = "encino_agent"
 path = "src/lib.rs"
@@ -21,7 +23,8 @@ zeroize.workspace = true
 base64.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["mm"] }
+# "mm" for mlock, "net" for the SO_PEERCRED check on an accepted connection.
+rustix = { workspace = true, features = ["mm", "net"] }
 
 [dev-dependencies]
 tempfile.workspace = true

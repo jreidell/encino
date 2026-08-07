@@ -148,6 +148,17 @@ pub struct PipeConnection {
 }
 
 impl PipeConnection {
+    /// Wait until this client has sent a whole line, or `timeout` passes.
+    ///
+    /// `false` means give up on the connection instead of reading it: a blocking
+    /// pipe read has no deadline of its own, so a client that attaches and then
+    /// says nothing would otherwise hold the agent's accept loop indefinitely.
+    pub fn wait_for_request(&self, timeout: std::time::Duration) -> bool {
+        // SAFETY: this connection owns `handle` and does not close it until
+        // Drop, so it is live for the whole call.
+        unsafe { crate::win::wait_for_line(self.handle, timeout) }
+    }
+
     fn as_file(&self) -> std::mem::ManuallyDrop<File> {
         // SAFETY: the handle outlives the borrow, and `ManuallyDrop` stops the
         // `File` closing a handle it does not own.
@@ -352,6 +363,40 @@ mod tests {
 
         let mut second = connect(&name).unwrap();
         assert_eq!(round_trip(&mut second, "second"), "second");
+    }
+
+    #[test]
+    fn a_client_that_says_nothing_is_given_up_on_rather_than_waited_for() {
+        let (mut server, name) = server();
+
+        // Attaches and then goes quiet. A blocking read would sit here until the
+        // session expired, and every other command would queue behind it.
+        let _silent = connect(&name).expect("client");
+        let connection = server.accept().expect("accept");
+
+        let started = std::time::Instant::now();
+        assert!(!connection.wait_for_request(Duration::from_millis(200)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait was not bounded: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_client_that_does_send_a_request_is_not_given_up_on() {
+        // The bound above must not have made the ordinary case flaky.
+        let (mut server, name) = server();
+        let mut client = connect(&name).unwrap();
+        send(&mut client, "status");
+
+        let connection = server.accept().expect("accept");
+        assert!(connection.wait_for_request(Duration::from_secs(5)));
+
+        // And peeking must not have consumed it.
+        let mut line = String::new();
+        BufReader::new(&connection).read_line(&mut line).expect("read request");
+        assert_eq!(line.trim(), "status");
     }
 
     #[test]

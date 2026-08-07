@@ -1,4 +1,4 @@
-# Strength: what actually protects a encino vault
+# Strength: what actually protects an encino vault
 
 Every figure here was measured against this build and the word lists it ships,
 not quoted from memory. The commands used are noted so they can be re-run.

@@ -2,9 +2,11 @@
 //!
 //! This crate owns everything dangerous: key derivation and wrapping, the
 //! encrypted index, the blob store, and the crash-recovery journal. It performs
-//! no terminal I/O and never prompts. Secrets enter as [`secrecy::SecretString`]
-//! and failures leave as [`Error`], so the whole surface is directly testable
-//! and can be driven by a CLI, a GUI, or a filesystem mount without change.
+//! no terminal I/O and never prompts — passphrases arrive as borrowed `&str`
+//! that the caller owns and wipes, key material lives in [`crypto::Key`], which
+//! zeroizes on drop and refuses to print itself, and failures leave as [`Error`].
+//! So the whole surface is directly testable and can be driven by a CLI, a GUI,
+//! or a filesystem mount without change.
 //!
 //! See `docs/format.md` for the on-disk format and `docs/threat-model.md` for
 //! what this design does and does not protect against.

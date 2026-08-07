@@ -4,10 +4,15 @@
 //! the result rather than repeating it per command.
 //!
 //! Clients receive the master key itself rather than delegating operations to
-//! the agent. The pipe admits exactly one account, and a process running as that
-//! account could read the agent's memory anyway; the boundary defended is the
-//! disk, not sibling processes. The key never touches disk, and reaches the
-//! agent over the child's stdin rather than its command line.
+//! the agent. The transport admits exactly one account — a DACL naming the
+//! owning SID on Windows, a 0600 socket in a verified-0700 directory plus an
+//! `SO_PEERCRED` check on Linux — and a process running as that account could
+//! read the agent's memory anyway; the boundary defended is the disk, not
+//! sibling processes. The key never touches disk, and reaches the agent over the
+//! child's stdin rather than its command line.
+//!
+//! Each connection is given a deadline to state its business, because the accept
+//! loop serves clients in turn and a blocking read has none of its own.
 
 pub mod client;
 pub mod diag;

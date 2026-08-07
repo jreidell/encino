@@ -1,4 +1,10 @@
-//! The Win32 calls the agent needs. Every `unsafe` block in encino lives here.
+//! The Win32 calls the agent needs: the user's SID, the pipe's security
+//! descriptor, keeping the key out of the page file, and giving a pipe read a
+//! deadline.
+//!
+//! `unsafe` in encino lives in exactly three files, all in this crate: this one,
+//! [`crate::unix`], and [`crate::pipe`], which owns the named-pipe lifecycle.
+//! `encino-core` is `#![forbid(unsafe_code)]` and `encino-cli` has none.
 
 use std::io;
 
@@ -80,6 +86,62 @@ pub fn make_std_handles_non_inheritable() {
 
 /// `INVALID_HANDLE_VALUE`, which `GetStdHandle` returns when there is no handle.
 const INVALID_HANDLE: HANDLE = -1isize as HANDLE;
+
+/// Bytes examined per peek. Requests are single JSON lines an order of magnitude
+/// shorter than the pipe's own buffer, so a line that is not in here is not one.
+const PEEK_BYTES: usize = 8 * 1024;
+
+/// How often to look while waiting for a request.
+const PEEK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Wait until a whole line is buffered on `handle`, or `timeout` passes.
+///
+/// `ReadFile` on a blocking pipe instance takes no deadline, so a client that
+/// connects and then says nothing would hold the agent's accept loop for as long
+/// as it cared to. Peeking does not consume, so the read that follows sees
+/// exactly the same bytes.
+///
+/// Returns whether a line arrived; `false` means drop the connection rather than
+/// read from it. A closed pipe returns immediately — there is nothing to wait for.
+///
+/// # Safety
+/// `handle` must be a live pipe instance for the duration of the call. The only
+/// caller is [`crate::pipe::PipeConnection::wait_for_request`], which owns one
+/// and so can guarantee that; this takes a bare handle rather than a connection
+/// to keep the FFI in this module.
+pub unsafe fn wait_for_line(handle: HANDLE, timeout: std::time::Duration) -> bool {
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buffer = [0u8; PEEK_BYTES];
+
+    loop {
+        let mut peeked: u32 = 0;
+        // SAFETY: the caller guarantees `handle` is live. The buffer and count
+        // pointers address local storage of exactly the length passed alongside
+        // them; the two optional outputs are declined.
+        let ok = unsafe {
+            PeekNamedPipe(
+                handle,
+                buffer.as_mut_ptr().cast(),
+                buffer.len() as u32,
+                &mut peeked,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return false;
+        }
+        if buffer[..peeked as usize].contains(&b'\n') {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(PEEK_INTERVAL);
+    }
+}
 
 /// A security descriptor granting full access to exactly one SID. `D:P` protects
 /// the ACL, so no inherited entry can widen access.

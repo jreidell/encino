@@ -19,7 +19,7 @@ pub enum Error {
     #[error("authentication failed: wrong credentials, or the data has been altered")]
     AuthenticationFailed,
 
-    /// The target directory is not a encino vault.
+    /// The target directory is not an encino vault.
     #[error("no vault found at {0} (run `encino init` first)")]
     NotAVault(PathBuf),
 
@@ -112,7 +112,7 @@ pub enum Error {
     },
 
     /// Stored data does not match the format this build expects.
-    #[error("{path} is corrupt or not a encino file: {detail}")]
+    #[error("{path} is corrupt or not an encino file: {detail}")]
     CorruptData {
         /// File involved.
         path: PathBuf,

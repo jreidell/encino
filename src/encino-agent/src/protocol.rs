@@ -73,8 +73,7 @@ pub fn socket_dir() -> std::path::PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime).join("encino");
     }
-    let uid = rustix::process::getuid().as_raw();
-    std::env::temp_dir().join(format!("encino-{uid}"))
+    std::env::temp_dir().join(format!("encino-{}", crate::unix::current_uid()))
 }
 
 /// Path of the socket serving one vault.
@@ -149,7 +148,7 @@ mod tests {
         // Two accounts must never share a directory, or the first to start an
         // agent owns it and the second cannot create one.
         let dir = socket_dir().to_string_lossy().into_owned();
-        let uid = rustix::process::getuid().as_raw().to_string();
+        let uid = crate::unix::current_uid().to_string();
         assert!(
             dir.contains(&uid) || std::env::var_os("XDG_RUNTIME_DIR").is_some(),
             "fallback directory must be distinguished by uid: {dir}"
