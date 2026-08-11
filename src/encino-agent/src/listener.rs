@@ -12,6 +12,20 @@ use crate::unix;
 pub struct SocketServer {
     listener: UnixListener,
     path: PathBuf,
+    /// Device and inode of the socket this server bound.
+    ///
+    /// Drop removes the socket by name, and by then the name may belong to a
+    /// successor: an agent shutting down while another starts for the same vault
+    /// would otherwise unlink the newcomer's socket, leaving it listening on
+    /// something no client can reach. Recorded so Drop can tell them apart.
+    identity: Option<(u64, u64)>,
+}
+
+/// Device and inode of whatever `path` currently names.
+fn identity_of(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
 impl SocketServer {
@@ -42,7 +56,7 @@ impl SocketServer {
         let listener = UnixListener::bind(path)?;
         unix::restrict_to_owner(path)?;
 
-        Ok(SocketServer { listener, path: path.to_path_buf() })
+        Ok(SocketServer { listener, path: path.to_path_buf(), identity: identity_of(path) })
     }
 
     /// Wait for a client.
@@ -53,7 +67,10 @@ impl SocketServer {
 
 impl Drop for SocketServer {
     fn drop(&mut self) {
-        // Removing the socket saves the next `bind` the connect-and-unlink probe.
-        let _ = std::fs::remove_file(&self.path);
+        // Removing the socket saves the next `bind` the connect-and-unlink
+        // probe — but only ours, never one that replaced it in the meantime.
+        if self.identity.is_some() && identity_of(&self.path) == self.identity {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }

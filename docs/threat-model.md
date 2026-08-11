@@ -52,7 +52,15 @@ checkout: a design that decrypts the whole folder would leak plaintext revisions
 into a sync provider's version history, where the user cannot delete them.
 
 **Another account on the same machine.** Blobs carry no filenames and the index
-is sealed. The session agent is reachable only by the account that started it,
+is sealed. A *checked-out* document is plaintext by definition, so on Unix it is
+created mode 0600 and `.encino` — which holds the staging area and the lock
+file — is created 0700; neither is left to the umask. On Windows both inherit the
+ACL of the folder the vault was created in, which is the right answer inside a
+user profile and the wrong one under a permissive drive root, so put the vault
+somewhere only you can read. The work area itself is your folder and encino does
+not change its permissions.
+
+The session agent is reachable only by the account that started it,
 enforced twice on each platform so that neither mechanism is load-bearing alone:
 
 - **Windows** — the pipe's security descriptor grants access to the owning SID
@@ -62,9 +70,13 @@ enforced twice on each platform so that neither mechanism is load-bearing alone:
 - **Linux** — the socket is 0600 inside a 0700 directory this process has
   verified it owns, and each accepted connection's `SO_PEERCRED` uid is checked
   against our own before the request is read.
+- **macOS** — the same directory and socket modes, with `getpeereid(2)` in place
+  of `SO_PEERCRED`, which is Linux-specific. Both ask the kernel for credentials
+  it recorded when the peer connected, so a client cannot claim to be somebody
+  else, and both fail closed.
 
-On other Unix systems the directory mode stands alone, since `SO_PEERCRED` is
-Linux-specific. macOS is untested; `getpeereid` is what it would want.
+On any other Unix the directory mode stands alone, and nothing further is claimed
+for those platforms. Windows, Linux and macOS are the three CI runs on.
 
 **Casual inspection.** Someone who opens the folder while it is locked sees an
 empty directory and a `.encino` folder of opaque blobs.
@@ -99,16 +111,21 @@ laptops. So:
   while a session is live writes the key out before the timer can fire.
 - Encrypt the whole volume, which covers the hibernation file. BitLocker protects
   `hiberfil.sys`; on Linux the swap device must be encrypted too, as encrypting
-  only the root filesystem leaves swap in the clear.
+  only the root filesystem leaves swap in the clear; on macOS FileVault covers
+  the sleep image, and closing the lid is the same trap it is everywhere else.
 
 **Physical coercion.** encino has no duress passphrase or deniable volume. If
 you can be compelled to reveal the passphrase, the documents are revealed.
 
 **Guaranteed erasure on SSDs.** `close` overwrites plaintext before unlinking,
 but on flash storage wear levelling and the FTL mean overwriting a logical block
-does not reliably erase the physical one. The real mitigation is volume-level
-encryption. **Run encino on a BitLocker-encrypted volume.** The CLI states this
-once at `init` rather than implying a guarantee it cannot make.
+does not reliably erase the physical one. On APFS there is a second reason
+independent of the hardware: the filesystem does not promise the overwrite lands
+on the same physical extents, and a Time Machine local snapshot taken while a
+document was checked out preserves the original blocks outright, where no amount
+of overwriting reaches them. The real mitigation is volume-level encryption.
+**Run encino on an encrypted volume — BitLocker, FileVault, or LUKS.** The CLI
+states this once at `init` rather than implying a guarantee it cannot make.
 
 **A weak passphrase.** Argon2id raises the cost of guessing but cannot rescue a
 passphrase that is short or reused. The passphrase and the recovery code are the
@@ -126,7 +143,7 @@ and two of them weaken the guarantees above.
 **Shredding becomes close to meaningless.** Overwriting a file writes to the
 *server's* storage, where shadow copies, NAS snapshots, copy-on-write
 filesystems, and server-side backups all preserve the original blocks. The advice
-to run on a BitLocker volume does not transfer, because the encryption you need
+to run on an encrypted volume does not transfer, because the encryption you need
 is on a machine you may not administer. Treat plaintext that has ever been
 checked out on a network share as recoverable by whoever runs the server.
 

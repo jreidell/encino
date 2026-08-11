@@ -72,11 +72,16 @@ impl AgentClient {
     /// Fetch the master key, or discover that no session is open.
     pub fn master_key(&self) -> Result<(Zeroizing<Vec<u8>>, Duration), AgentError> {
         match self.send(&Request::MasterKey)? {
-            Response::MasterKey { key, expires_in } => {
+            Response::MasterKey { mut key, expires_in } => {
                 use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&key)
-                    .map_err(|e| AgentError::Protocol(format!("key was not valid base64: {e}")))?;
+                use zeroize::Zeroize;
+
+                let decoded = base64::engine::general_purpose::STANDARD.decode(&key);
+                // Before any early return, so no path leaves the encoded key behind.
+                key.zeroize();
+
+                let bytes =
+                    decoded.map_err(|e| AgentError::Protocol(format!("key was not valid base64: {e}")))?;
                 if bytes.len() != 32 {
                     return Err(AgentError::Protocol("key was the wrong length".into()));
                 }
@@ -126,14 +131,22 @@ impl AgentClient {
         writer.write_all(b"\n").map_err(AgentError::Io)?;
         writer.flush().map_err(AgentError::Io)?;
 
+        // Holds the whole reply, master key included, so it is wiped rather than
+        // dropped — on every path, including the failures.
         let mut reply = String::new();
-        BufReader::new(&stream).read_line(&mut reply).map_err(AgentError::Io)?;
-        if reply.trim().is_empty() {
-            return Err(AgentError::Protocol("the agent closed the connection without replying".into()));
-        }
+        let read = BufReader::new(&stream).read_line(&mut reply).map_err(AgentError::Io);
 
-        serde_json::from_str(reply.trim())
-            .map_err(|e| AgentError::Protocol(format!("could not decode the reply: {e}")))
+        let parsed = read.and_then(|_| {
+            if reply.trim().is_empty() {
+                Err(AgentError::Protocol("the agent closed the connection without replying".into()))
+            } else {
+                serde_json::from_str(reply.trim())
+                    .map_err(|e| AgentError::Protocol(format!("could not decode the reply: {e}")))
+            }
+        });
+
+        zeroize::Zeroize::zeroize(&mut reply);
+        parsed
     }
 
     /// Open the pipe, retrying while every instance is busy. An absent pipe

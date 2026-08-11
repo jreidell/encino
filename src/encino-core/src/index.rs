@@ -186,8 +186,15 @@ impl Index {
     }
 
     /// Encrypt and write the index, retaining the previous generation.
+    ///
+    /// Only a primary that still decrypts is kept as the backup. Copying a
+    /// damaged one over would destroy the last good generation — and a damaged
+    /// primary is exactly the situation in which the backup is about to be the
+    /// only thing standing between the user and every document, so this is the
+    /// one moment it must not be overwritten. The cost is decrypting a small
+    /// file once per save.
     pub fn save(&self, path: &Path, backup: &Path, index_key: &Key, vault_id: &Uuid) -> Result<()> {
-        if path.exists() {
+        if path.exists() && Index::load(path, index_key, vault_id).is_ok() {
             fsutil::copy_atomic(path, backup)?;
         }
         fsutil::write_atomic(path, &self.encode(index_key, vault_id)?)
@@ -351,6 +358,49 @@ mod tests {
 
         assert_eq!(Index::load(&path, &key, &vault).unwrap().len(), 4);
         assert_eq!(Index::load(&backup, &key, &vault).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_damaged_primary_is_never_copied_over_the_last_good_backup() {
+        // The compounding failure: fall back to the backup, then have the next
+        // save copy the corrupt primary over the very generation that rescued
+        // it. One `add` after an undetected corruption would leave nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, backup) = (dir.path().join("index.enc"), dir.path().join("index.enc.bak"));
+        let key = Key::random();
+        let vault = Uuid::new_v4();
+
+        populated().save(&path, &backup, &key, &vault).unwrap();
+        let mut grown = populated();
+        grown.insert(entry("new-document.pdf")).unwrap();
+        grown.save(&path, &backup, &key, &vault).unwrap();
+        assert_eq!(Index::load(&backup, &key, &vault).unwrap().len(), 3);
+
+        std::fs::write(&path, b"corrupted beyond repair").unwrap();
+        let (recovered, _) = Index::load_with_fallback(&path, &backup, &key, &vault).unwrap();
+        recovered.save(&path, &backup, &key, &vault).unwrap();
+
+        // The backup must still be a readable index rather than the garbage.
+        let kept = Index::load(&backup, &key, &vault).expect("the good backup was destroyed");
+        assert_eq!(kept.len(), 3);
+        assert_eq!(Index::load(&path, &key, &vault).unwrap().len(), 3, "the primary should be repaired");
+    }
+
+    #[test]
+    fn an_intact_primary_is_still_retained_as_the_backup() {
+        // The guard above must not have stopped the ordinary generation-keeping.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, backup) = (dir.path().join("index.enc"), dir.path().join("index.enc.bak"));
+        let key = Key::random();
+        let vault = Uuid::new_v4();
+
+        populated().save(&path, &backup, &key, &vault).unwrap();
+        let mut grown = populated();
+        grown.insert(entry("new-document.pdf")).unwrap();
+        grown.save(&path, &backup, &key, &vault).unwrap();
+
+        assert_eq!(Index::load(&backup, &key, &vault).unwrap().len(), 3);
+        assert_eq!(Index::load(&path, &key, &vault).unwrap().len(), 4);
     }
 
     #[test]

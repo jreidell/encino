@@ -106,6 +106,13 @@ fn open_exclusive(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().write(true).create(true).truncate(true).share_mode(FILE_SHARE_READ).open(path)
 }
 
+/// How many times to re-open when the lock file is replaced underneath us.
+///
+/// Each retry needs a release to land in a window of a few instructions, so more
+/// than a couple in a row is not contention but something pathological.
+#[cfg(unix)]
+const MAX_LOCK_ATTEMPTS: u32 = 8;
+
 /// Take an advisory exclusive lock on the file, without blocking.
 ///
 /// The lock belongs to the open file description, so the kernel drops it when
@@ -113,19 +120,55 @@ fn open_exclusive(path: &Path) -> std::io::Result<File> {
 /// Advisory suffices: only encino needs to respect it. Over NFS `flock` may be
 /// emulated or silently local, so two machines sharing a vault may not see each
 /// other's locks. See `docs/threat-model.md`.
+///
+/// The lock file is unlinked on release, and that is what makes the identity
+/// check below necessary rather than paranoid. A process can open the file,
+/// be preempted, and have the holder release *and unlink* before its own
+/// `flock` runs — at which point the lock is granted on an inode with no name,
+/// while the next process along creates a fresh file at the same path and locks
+/// that. Both would then believe they hold the vault, and two concurrent index
+/// saves destroy the content keys of whichever entries the loser wrote. So the
+/// descriptor is confirmed to still be the file at `path` before the lock is
+/// trusted, and the attempt starts over if it is not.
 #[cfg(unix)]
 fn open_exclusive(path: &Path) -> std::io::Result<File> {
     use rustix::fs::{FlockOperation, flock};
 
-    let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    for _ in 0..MAX_LOCK_ATTEMPTS {
+        let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
 
-    // Non-blocking: a held vault should be reported at once, not waited on.
-    flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(std::io::Error::from)?;
+        // Non-blocking: a held vault should be reported at once, not waited on.
+        flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(std::io::Error::from)?;
 
-    // Truncate only once the lock is held: truncating on open would wipe the
-    // real owner's holder record.
-    file.set_len(0)?;
-    Ok(file)
+        if !still_named(&file, path)? {
+            // Dropping releases the lock on the orphaned inode.
+            continue;
+        }
+
+        // Truncate only once the lock is held: truncating on open would wipe the
+        // real owner's holder record.
+        file.set_len(0)?;
+        return Ok(file);
+    }
+
+    // Somebody is churning the lock file. Reported as contention, which is what
+    // it amounts to from the caller's side.
+    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+}
+
+/// Whether `file` is still the file living at `path`.
+///
+/// Compared by device and inode rather than by opening again, because the
+/// question is precisely whether the name still resolves to this object.
+#[cfg(unix)]
+fn still_named(file: &File, path: &Path) -> std::io::Result<bool> {
+    let held = rustix::fs::fstat(file)?;
+    match rustix::fs::stat(path) {
+        Ok(named) => Ok(named.st_dev == held.st_dev && named.st_ino == held.st_ino),
+        // Unlinked between the lock and this check: not ours to hold.
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Last-resort fallback for platforms that are neither Windows nor Unix.
@@ -261,6 +304,54 @@ mod tests {
         let nested = dir.path().join("a").join("b").join("work.lock");
         let _held = VaultLock::acquire(&nested).unwrap();
         assert!(nested.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handle_is_only_the_lock_while_it_is_still_the_named_file() {
+        // The guard that closes the release-and-unlink race. Without it a handle
+        // could win its `flock` on an inode that had just lost its name, while
+        // the next process created a fresh file at that name and locked that —
+        // two holders, and two concurrent index saves.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("work.lock");
+
+        let file = OpenOptions::new().write(true).create(true).truncate(false).open(&path).unwrap();
+        assert!(still_named(&file, &path).unwrap(), "an untouched lock file is its own name");
+
+        // Released and unlinked by the holder, which is what `close` does.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!still_named(&file, &path).unwrap(), "an unlinked inode must not count as the lock");
+
+        // And the name now belongs to a different file entirely.
+        let _successor = OpenOptions::new().write(true).create(true).truncate(false).open(&path).unwrap();
+        assert!(!still_named(&file, &path).unwrap(), "a replaced lock file must not count as the lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_replaced_underneath_an_acquisition_does_not_yield_a_second_holder() {
+        // The end-to-end shape of the same thing: whatever happens to the file,
+        // two live `VaultLock`s for one path must never coexist.
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_path(&dir);
+
+        let held = VaultLock::acquire(&path).unwrap();
+
+        // Someone deletes the lock file while it is held — by hand, or by a
+        // process that crashed midway through releasing.
+        std::fs::remove_file(&path).ok();
+
+        // The newcomer legitimately gets the recreated name. What must not
+        // happen is the original still being usable as an exclusive claim.
+        let newcomer = VaultLock::acquire(&path).unwrap();
+        assert!(
+            matches!(VaultLock::acquire(&path), Err(Error::VaultInUse { .. })),
+            "the recreated lock file must itself be exclusive"
+        );
+
+        drop(newcomer);
+        drop(held);
     }
 
     #[test]

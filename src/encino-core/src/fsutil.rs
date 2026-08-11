@@ -1,6 +1,6 @@
 //! Filesystem helpers with the durability guarantees this crate depends on.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,88 @@ use crate::{Error, Result};
 pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|e| Error::io("create directory", path, e))
 }
+
+/// Create a directory only its owner may enter.
+///
+/// For `.encino` and the staging area beneath it, which holds plaintext while a
+/// checkout is assembled. The mode is applied best-effort: a vault on a network
+/// share may sit on a filesystem with no Unix permissions to set, and that must
+/// not fail an import. On Windows a new directory inherits the ACL of its
+/// parent; see `docs/threat-model.md` for what that does and does not give.
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    ensure_dir(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Permissions for a file holding plaintext: the owner, and nobody else.
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// Create a file that must not already exist, readable only by its owner.
+///
+/// Every file this crate writes plaintext into goes through here or
+/// [`create_private`]. `File::create` would take `0666 & !umask` — 0644 under
+/// the usual umask — which leaves a checked-out document readable by every
+/// account on the machine, one of the cases `docs/threat-model.md` puts in
+/// scope.
+pub fn create_new_private(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    open_private(options, path)
+}
+
+/// Create or replace a file, readable only by its owner.
+pub fn create_private(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    let file = open_private(options, path)?;
+
+    // `mode` applies only when the open creates the file, so a path that was
+    // already there would keep whatever permissions it arrived with.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE));
+    }
+    Ok(file)
+}
+
+fn open_private(mut options: OpenOptions, path: &Path) -> Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(PRIVATE_FILE_MODE);
+    }
+    options.open(path).map_err(|e| Error::io("create", path, e))
+}
+
+/// Flush a directory's own entries to physical storage.
+///
+/// Renaming a file into place is atomic, but the rename is not *durable* until
+/// the directory holding it is flushed: a power failure can otherwise leave a
+/// fully synced file that no name points at. That matters here because the
+/// journal reads the index as the record of what happened — an index whose
+/// rename was lost reads as an operation that never completed, and `add` has by
+/// then already shredded the original.
+///
+/// Best-effort, and deliberately so. There is no portable directory `fsync`:
+/// Windows has no handle to open this way, and some network filesystems refuse.
+/// A vault on a share must keep working, so a refusal is not allowed to fail an
+/// import — the same trade [`normalize_times`] makes.
+#[cfg(unix)]
+pub fn sync_dir(path: &Path) {
+    let _ = File::open(path).and_then(|dir| dir.sync_all());
+}
+
+/// No counterpart on Windows: a directory cannot be opened for flushing without
+/// `FILE_FLAG_BACKUP_SEMANTICS`, and NTFS journals the metadata regardless.
+#[cfg(not(unix))]
+pub fn sync_dir(_path: &Path) {}
 
 /// Resolve a path to a single canonical form.
 ///
@@ -99,6 +181,9 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temp);
         return Err(Error::io("replace", path, e));
     }
+
+    // The contents were flushed above; this is what makes the *name* durable.
+    sync_dir(parent);
     Ok(())
 }
 
@@ -111,6 +196,11 @@ pub fn write_new_synced(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file = File::create_new(path).map_err(|e| Error::io("create", path, e))?;
     file.write_all(contents).map_err(|e| Error::io("write", path, e))?;
     file.sync_all().map_err(|e| Error::io("flush to disk", path, e))?;
+    drop(file);
+
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
+    }
     Ok(())
 }
 
@@ -261,5 +351,81 @@ mod tests {
     fn removing_an_absent_file_is_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         remove_if_present(&dir.path().join("never-existed")).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_holding_plaintext_is_readable_only_by_its_owner() {
+        // `File::create` would give 0644 under the usual umask, leaving a
+        // checked-out document readable by every account on the machine.
+        let dir = tempfile::tempdir().unwrap();
+
+        let fresh = dir.path().join("checkout");
+        drop(create_new_private(&fresh).unwrap());
+        assert_eq!(mode_of(&fresh), 0o600, "a staged document must not be group- or world-readable");
+
+        let replaced = dir.path().join("export");
+        drop(create_private(&replaced).unwrap());
+        assert_eq!(mode_of(&replaced), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_was_already_there_has_its_permissions_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // `mode` on the open applies only when the open creates the file, so a
+        // path left behind by something else would otherwise keep its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export");
+
+        fs::write(&path, b"left over").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+
+        drop(create_private(&path).unwrap());
+        assert_eq!(mode_of(&path), 0o600, "an existing file kept its permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_directory_admits_nobody_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("vault-dir");
+
+        ensure_private_dir(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o700);
+
+        // Idempotent, and corrects a directory left wide open by an older build.
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_dir(&target).unwrap();
+        assert_eq!(mode_of(&target), 0o700);
+    }
+
+    #[test]
+    fn creating_a_file_that_already_exists_is_still_refused() {
+        // The permission work must not have loosened the anti-clobber guarantee
+        // blob writing depends on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+
+        drop(create_new_private(&path).unwrap());
+        assert!(create_new_private(&path).is_err());
+    }
+
+    #[test]
+    fn syncing_a_directory_is_silent_whatever_the_platform_thinks_of_it() {
+        // Best-effort: a filesystem that refuses must not fail an import, and on
+        // Windows there is nothing to open at all.
+        let dir = tempfile::tempdir().unwrap();
+        sync_dir(dir.path());
+        sync_dir(&dir.path().join("never-existed"));
     }
 }

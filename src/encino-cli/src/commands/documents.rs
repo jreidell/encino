@@ -397,10 +397,26 @@ fn quoted_for_explorer(path: &Path) -> Option<String> {
     if text.contains('"') { None } else { Some(format!("\"{text}\"")) }
 }
 
-/// No shell here either: `xdg-open` is executed directly with one argument.
+/// The program that resolves a file's default handler on this Unix.
+///
+/// `xdg-open` is a freedesktop tool and simply does not exist on macOS, where
+/// the equivalent is `open(1)`. Split out so the choice is testable without
+/// launching anything.
+#[cfg(not(windows))]
+fn launcher() -> &'static str {
+    if cfg!(target_os = "macos") { "open" } else { "xdg-open" }
+}
+
+/// No shell here either: the launcher is executed directly with one argument.
 #[cfg(not(windows))]
 fn launch_default_app(path: &Path) {
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let launcher = launcher();
+    // Never silently, for the same reason as the Windows path: the document is
+    // decrypted and sitting there, so the user needs to know nothing opened it.
+    // This is exactly how `xdg-open` failed on macOS — by not being there.
+    if let Err(e) = std::process::Command::new(launcher).arg(path).spawn() {
+        eprintln!("  (not launched: could not run {launcher}: {e})");
+    }
 }
 
 /// Render a timestamp for `--json`.
@@ -455,6 +471,18 @@ mod tests {
         // Unreachable in practice — Windows forbids `"` in a filename — which is
         // why it is checked rather than assumed.
         assert!(quoted_for_explorer(Path::new("E:\\vault\\od\"d.pdf")).is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_launcher_is_the_one_that_exists_on_this_system() {
+        // `xdg-open` is not present on macOS, so `--with` there spawned nothing
+        // and said nothing about it.
+        if cfg!(target_os = "macos") {
+            assert_eq!(launcher(), "open");
+        } else {
+            assert_eq!(launcher(), "xdg-open");
+        }
     }
 
     #[test]

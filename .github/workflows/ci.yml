@@ -21,12 +21,15 @@ env:
 
 jobs:
   test:
-    # Both platforms the README claims. A cross-platform claim nobody checks is
-    # a claim that quietly stops being true.
+    # Every platform the README claims. A cross-platform claim nobody checks is
+    # a claim that quietly stops being true — macOS was described as "should
+    # work" for exactly as long as nothing ran there, and when something finally
+    # did it had a socket path three bytes under the `sockaddr_un` limit and a
+    # `--with` that shelled out to a program macOS does not ship.
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
 
     steps:

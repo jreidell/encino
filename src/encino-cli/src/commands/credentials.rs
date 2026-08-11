@@ -54,8 +54,24 @@ pub fn init(folder: &Path) -> Result<()> {
 
     // Kept apart from the loss warning so neither dilutes the other.
     println!("\nOne thing for later: shredding cannot guarantee erasure on an SSD,");
-    println!("so run this on a BitLocker-encrypted volume if you want that.");
+    println!("so run this on a {}-encrypted volume if you want that.", volume_encryption());
     Ok(())
+}
+
+/// What whole-volume encryption is called on this system.
+///
+/// Named rather than described, because advice a user cannot act on is not
+/// advice — and telling someone on a Mac to enable BitLocker is worse than
+/// saying nothing, since it reads as though encino were built for another
+/// machine.
+fn volume_encryption() -> &'static str {
+    if cfg!(windows) {
+        "BitLocker"
+    } else if cfg!(target_os = "macos") {
+        "FileVault"
+    } else {
+        "LUKS"
+    }
 }
 
 /// The one warning `init` gives, printed before anything is chosen.
@@ -215,6 +231,18 @@ fn print_recovery_code(code: &RecoveryCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_volume_encryption_named_is_one_this_system_actually_has() {
+        let named = volume_encryption();
+        if cfg!(windows) {
+            assert_eq!(named, "BitLocker");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(named, "FileVault");
+        } else {
+            assert_eq!(named, "LUKS");
+        }
+    }
 
     #[test]
     fn durations_read_in_units_a_person_can_feel() {

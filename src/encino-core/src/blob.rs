@@ -248,6 +248,13 @@ pub fn write_blob<R: Read>(source: &mut R, dest: &Path, id: &BlobId, key: &Key) 
     // nothing holds open.
     drop(file);
 
+    // `sync_all` above made the contents durable; this makes the blob's name
+    // durable, so a crash cannot leave the index pointing at a blob that has no
+    // directory entry.
+    if let Some(shard) = dest.parent() {
+        crate::fsutil::sync_dir(shard);
+    }
+
     // The blob, its shard, and the store root. Writing the blob moved all three,
     // and a shard's mtime alone would still say when a document changed.
     crate::fsutil::normalize_times(dest);

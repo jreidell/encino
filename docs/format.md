@@ -301,9 +301,24 @@ document's key be applied to another's ciphertext.
 ### Atomic replacement
 
 The index is the single point of total failure: lose it and every blob becomes
-unrecoverable noise. It is therefore replaced by write-temp, fsync, rename, and
-the prior generation is retained as `index.enc.bak`. `rename` over an existing
-file is atomic on NTFS, so a crash leaves either the old index or the new one.
+unrecoverable noise. It is therefore replaced by write-temp, fsync, rename,
+fsync-the-directory, and the prior generation is retained as `index.enc.bak`.
+`rename` over an existing file is atomic on NTFS, so a crash leaves either the
+old index or the new one.
+
+The second fsync is what makes the *name* durable and not merely the bytes.
+Without it a power failure can leave a fully flushed file that no directory entry
+points at, which recovery reads as an operation that never completed — and by
+then `add` has already shredded the original. It is best-effort, because there is
+no portable directory fsync: Windows has no handle to open this way, and some
+network filesystems refuse. Blobs get the same treatment on their shard.
+
+Only a primary that still decrypts is copied to `index.enc.bak`. A damaged
+primary is exactly when the backup is about to be the only surviving copy, so
+that is the one moment it must not be overwritten with the damage. When the
+backup is used, the session says so: it is a generation old, so any document
+added since is no longer indexed and its blob is left orphaned, which `verify`
+reports.
 
 ## Journal
 

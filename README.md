@@ -58,9 +58,11 @@ Full details in [docs/format.md](docs/format.md).
 
 Read [the threat model](docs/threat-model.md). Four things especially:
 
-**Run encino on a BitLocker-encrypted volume.** Shredding cannot guarantee
-erasure on an SSD — wear levelling means overwriting a logical block does not
-reliably erase the physical one. Volume encryption is the real mitigation.
+**Run encino on an encrypted volume** — BitLocker on Windows, FileVault on
+macOS, LUKS or equivalent on Linux. Shredding cannot guarantee erasure on an SSD:
+wear levelling means overwriting a logical block does not reliably erase the
+physical one, and on APFS a Time Machine local snapshot keeps the original blocks
+outright. Volume encryption is the real mitigation.
 
 **Lock before the machine hibernates.** Hibernating writes all of memory to
 disk, including the locked pages holding the master key. Closing a laptop lid is
@@ -619,24 +621,34 @@ about 100 KB per binary and removes the failure mode entirely.
 
 ### Platforms
 
-Windows and Linux, from the same source. macOS should work — it takes the Unix
-paths throughout — but has not been tested.
+Windows, Linux and macOS, from the same source, and all three run in CI.
 
-Everything is verified on both: 219 tests on Windows, 213 on Linux. The
-difference is not coverage but platform: the Windows-only tests cover named
-pipes and SIDs, the Linux-only ones file permissions, socket paths, and the
-peer-credential check on an accepted connection.
+macOS was described as "should work — it takes the Unix paths throughout" for
+exactly as long as nothing ran there. What it actually had was a socket path
+three bytes inside the `sockaddr_un` limit, a `--with` that shelled out to a
+program macOS does not ship, and no peer-credential check on the agent socket at
+all. None of that is visible from reading the code; it took a test run. Those are
+fixed, and macOS is in the matrix now, which is what makes it a target rather
+than an aspiration.
 
-The platform differences are confined to these, and each takes the same shape on
-both systems:
+240 tests pass on macOS. The per-platform totals differ because tests that do not
+apply are compiled out rather than skipped: named pipes and SIDs on Windows, file
+modes, socket paths and peer credentials on Unix. CI reports each, which is the
+figure to trust — a count written down here goes stale the next time anyone adds
+a test.
+
+The platform differences are confined to the table below, and each takes the same
+shape everywhere:
 
 | | Windows | Unix |
 |---|---|---|
 | Vault lock | file opened denying write sharing | `flock(LOCK_EX \| LOCK_NB)` |
 | Agent transport | named pipe, DACL'd to your SID | `0600` socket in a `0700` directory |
-| Who may connect | the DACL, plus remote clients refused | the directory, plus `SO_PEERCRED` on Linux |
+| Who may connect | the DACL, plus remote clients refused | the directory, plus `SO_PEERCRED` (Linux) or `getpeereid` (macOS) |
 | Key kept out of swap | `VirtualLock` | `mlock` |
-| Blob timestamps | normalized, creation time included | normalized; `ctime` not settable |
+| Plaintext file mode | inherited from the parent folder's ACL | `0600`, and `.encino` `0700` |
+| Open in default app | `explorer` | `xdg-open`, or `open` on macOS |
+| Blob timestamps | normalized, creation time included | normalized; `ctime` not settable, though APFS pulls `birthtime` back with `mtime` |
 
 The lock relies on the same property on both: it is a *held handle*, so the
 kernel releases it when the process dies and there are no stale locks to clear.
@@ -664,7 +676,7 @@ rather than a rewrite.
 ## Contributing
 
 Issues and pull requests are welcome. "Done" means all four of these pass, on
-both Windows and Linux — which is what CI enforces:
+Windows, Linux and macOS — which is what CI enforces:
 
 ```bash
 cargo build --release

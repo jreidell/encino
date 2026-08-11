@@ -74,6 +74,8 @@ pub struct Session {
     blob_wrap_key: Key,
     index: Index,
     journal: Journal,
+    recovered_from_backup: bool,
+    recovery_actions: Vec<RecoveryAction>,
     /// Declared last so it outlives the fields whose writes it protects.
     _lock: VaultLock,
 }
@@ -108,16 +110,45 @@ impl Session {
         let blob_wrap_key = crypto::derive_subkey(master, CTX_BLOB_KEY);
         let journal = Journal::new(vault.journal_dir());
 
-        let (index, _used_backup) = Index::load_with_fallback(
+        let (index, used_backup) = Index::load_with_fallback(
             &vault.index_path(),
             &vault.index_backup_path(),
             &index_key,
             vault.id(),
         )?;
 
-        let mut session = Session { vault, index_key, blob_wrap_key, index, journal, _lock: lock };
-        session.reconcile()?;
+        let mut session = Session {
+            vault,
+            index_key,
+            blob_wrap_key,
+            index,
+            journal,
+            recovered_from_backup: used_backup,
+            recovery_actions: Vec::new(),
+            _lock: lock,
+        };
+        session.recovery_actions = session.reconcile()?;
         Ok(session)
+    }
+
+    /// Whether the index had to be restored from its backup generation because
+    /// the primary would not decrypt.
+    ///
+    /// Kept rather than discarded because the consequence is silent data loss:
+    /// the backup is one generation old, so any document added since it was
+    /// written is no longer in the index and its blob is now an orphan. The
+    /// caller is expected to say so.
+    pub fn recovered_from_backup(&self) -> bool {
+        self.recovered_from_backup
+    }
+
+    /// What an interrupted previous run left behind, reconciled as this session
+    /// opened. Empty in the ordinary case.
+    ///
+    /// Worth surfacing for the same reason: `RolledBackCheckin` in particular
+    /// means a document the user thought they had closed is still decrypted.
+    pub fn recovery_actions(&self) -> &[RecoveryAction] {
+        &self.recovery_actions
     }
 
     /// The vault this session is attached to.
@@ -341,7 +372,8 @@ impl Session {
                 crate::index::unwrap_content_key(&entry.wrapped_key, &entry.blob_id, &self.blob_wrap_key)?;
             let blob_path = entry.blob_id.path_under(&self.vault.blobs_dir());
 
-            let mut out = File::create(&target).map_err(|e| Error::io("create", &target, e))?;
+            // Owner-only, like a checkout: an export is plaintext too.
+            let mut out = fsutil::create_private(&target)?;
             let stats = blob::read_blob(&blob_path, &mut out, &entry.blob_id, &content_key)?;
             out.sync_all().map_err(|e| Error::io("flush", &target, e))?;
 

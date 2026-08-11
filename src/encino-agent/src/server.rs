@@ -290,13 +290,19 @@ fn serve_one(agent: &Agent, connection: pipe::PipeConnection) {
         return;
     }
 
-    let response = match serde_json::from_str::<Request>(line.trim()) {
+    let mut response = match serde_json::from_str::<Request>(line.trim()) {
         Ok(request) => agent.handle(request),
         Err(e) => Response::Error { message: format!("malformed request: {e}") },
     };
     line.zeroize();
 
-    if let Ok(mut encoded) = serde_json::to_string(&response) {
+    // Wiped below once it has been serialized, so the agent — the one process
+    // that bothers to lock the key into memory — does not leave a base64 copy
+    // of it in freed heap after every request.
+    let sent = serde_json::to_string(&response);
+    response.zeroize_secrets();
+
+    if let Ok(mut encoded) = sent {
         let mut writer = &connection;
         let _ = writer.write_all(encoded.as_bytes());
         let _ = writer.write_all(b"\n");
@@ -398,13 +404,19 @@ fn serve_one(agent: &Agent, stream: std::os::unix::net::UnixStream) {
         return;
     }
 
-    let response = match serde_json::from_str::<Request>(line.trim()) {
+    let mut response = match serde_json::from_str::<Request>(line.trim()) {
         Ok(request) => agent.handle(request),
         Err(e) => Response::Error { message: format!("malformed request: {e}") },
     };
     line.zeroize();
 
-    if let Ok(mut encoded) = serde_json::to_string(&response) {
+    // Wiped below once it has been serialized, so the agent — the one process
+    // that bothers to lock the key into memory — does not leave a base64 copy
+    // of it in freed heap after every request.
+    let sent = serde_json::to_string(&response);
+    response.zeroize_secrets();
+
+    if let Ok(mut encoded) = sent {
         let mut writer = &stream;
         let _ = writer.write_all(encoded.as_bytes());
         let _ = writer.write_all(b"\n");

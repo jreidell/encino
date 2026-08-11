@@ -17,17 +17,46 @@ pub fn open_session(root: &Path) -> Result<Session> {
     let vault = Vault::open(root)?;
     let client = AgentClient::for_vault(&vault.id().to_string())?;
 
-    match client.master_key() {
+    let session = match client.master_key() {
         Ok((key, _)) => {
             let master = encino_core::crypto::Key::from_slice(&key)?;
-            Ok(Session::from_master(vault, &master)?)
+            Session::from_master(vault, &master)?
         }
         Err(AgentError::NotRunning) => {
             prompt::require_interactive()?;
             let passphrase = prompt::passphrase("Passphrase: ")?;
-            Ok(Session::unlock(vault, &passphrase)?)
+            Session::unlock(vault, &passphrase)?
         }
-        Err(e) => Err(e.into()),
+        Err(e) => return Err(e.into()),
+    };
+
+    report_recovery(&session);
+    Ok(session)
+}
+
+/// Say what opening the vault had to repair, if anything.
+///
+/// Both of these are computed while a session opens and were previously
+/// discarded. Neither is cosmetic: a document can go missing without a word, and
+/// a rolled-back check-in leaves plaintext on disk that the user believes they
+/// closed. Written to stderr so `--json` and piped output stay machine-readable.
+fn report_recovery(session: &Session) {
+    if session.recovered_from_backup() {
+        eprintln!(
+            "WARNING: the document index was damaged and has been restored from its\n\
+             backup copy, which is one generation old. Any document added since then\n\
+             is no longer listed, and its encrypted data is now unreferenced.\n\
+             Run `encino verify` to see what is unaccounted for.\n"
+        );
+    }
+
+    let actions = session.recovery_actions();
+    if !actions.is_empty() {
+        eprintln!("A previous run was interrupted. On opening this vault, encino:");
+        for action in actions {
+            eprintln!("  - {action}");
+        }
+        eprintln!();
     }
 }
 
@@ -54,6 +83,7 @@ pub fn unlock(root: &Path, timer: Option<&str>) -> Result<()> {
 
     // Prove the key opens the vault before starting an agent to hold it, so a damaged index surfaces now.
     let session = Session::from_master(vault.clone(), &master)?;
+    report_recovery(&session);
     let held = session.len();
     drop(session);
 

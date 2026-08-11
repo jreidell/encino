@@ -42,6 +42,9 @@ impl VaultMeta {
                 detail: "vault has no key wraps, so it can never be opened".into(),
             });
         }
+        for wrap in &self.wraps {
+            wrap.validate(path)?;
+        }
         Ok(())
     }
 
@@ -86,12 +89,15 @@ impl Vault {
             wraps,
         };
 
-        fsutil::ensure_dir(&vault_dir)?;
+        // Owner-only: the staging area beneath it holds plaintext mid-checkout,
+        // and `work.lock` names the machine and process using the vault. The
+        // work area itself is the user's own folder and is left as they had it.
+        fsutil::ensure_private_dir(&vault_dir)?;
         // Canonical from here on, so later path comparisons use one spelling of the root.
         let vault = Vault { root: fsutil::canonical(root)?, meta };
         fsutil::ensure_dir(&vault.blobs_dir())?;
         fsutil::ensure_dir(&vault.journal_dir())?;
-        fsutil::ensure_dir(&vault.staging_dir())?;
+        fsutil::ensure_private_dir(&vault.staging_dir())?;
         vault.save_meta()?;
 
         // Seed an empty index so that a missing index is an error routed to the backup
@@ -368,7 +374,24 @@ mod tests {
         assert!(!text.contains(&hex::encode(master.expose())));
         assert!(!text.contains(&crate::crypto::b64::encode(master.expose())));
         assert!(!text.contains("correct horse battery staple"));
-        assert!(!text.contains(recovery.words()[0]) || recovery.words()[0].len() < 4);
+
+        // Not a single word: thirteen BIP39 words occur verbatim in every
+        // `vault.json`, mostly inside its own field names — `cover`, `over` and
+        // `very` sit in "recovery", `once` in "nonce", `pass` and `phrase` in
+        // "passphrase", `text` in "ciphertext", alongside `salt`, `wrap`,
+        // `kind`, `memory`, `version` and `vault`. Testing the first word alone
+        // therefore failed outright whenever the generated code happened to
+        // start with one of them: a 13-in-2048 chance of a red build that says
+        // nothing about the property being tested.
+        //
+        // Any two consecutive words is the honest test. A pair cannot collide
+        // with field names by accident, and a leak that spilled the phrase
+        // would spill it in order.
+        assert!(!text.contains(recovery.phrase().as_str()));
+        for pair in recovery.words().windows(2) {
+            let pair = pair.join(" ");
+            assert!(!text.contains(&pair), "the recovery phrase leaked into vault.json at {pair:?}");
+        }
     }
 
     #[test]

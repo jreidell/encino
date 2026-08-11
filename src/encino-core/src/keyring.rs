@@ -198,6 +198,48 @@ pub struct KeyWrap {
     pub ciphertext: Vec<u8>,
 }
 
+/// Shortest salt Argon2 will accept.
+const MIN_SALT_LEN: usize = 8;
+
+impl KeyWrap {
+    /// Reject a wrap whose fields are the wrong shape.
+    ///
+    /// Checked when the vault is opened, so that a malformed `vault.json` is
+    /// refused as metadata rather than surfacing later as a derivation failure.
+    /// That distinction matters: [`Error`] deliberately collapses every
+    /// credential failure into [`Error::AuthenticationFailed`] so none can be
+    /// told apart, and a short salt reaching Argon2 would produce a different
+    /// error for one particular kind of tampering.
+    pub fn validate(&self, path: &std::path::Path) -> Result<()> {
+        let bad = |detail: String| Error::MalformedMetadata { path: path.to_path_buf(), detail };
+
+        if self.salt.len() < MIN_SALT_LEN {
+            return Err(bad(format!(
+                "a {} key wrap has a {}-byte salt",
+                self.kind.describe(),
+                self.salt.len()
+            )));
+        }
+        if self.nonce.len() != crypto::NONCE_LEN {
+            return Err(bad(format!(
+                "a {} key wrap has a {}-byte nonce, expected {}",
+                self.kind.describe(),
+                self.nonce.len(),
+                crypto::NONCE_LEN
+            )));
+        }
+        // A wrapped 32-byte key plus its authentication tag; anything shorter
+        // cannot be one whatever the credential.
+        if self.ciphertext.len() < crypto::KEY_LEN + crypto::TAG_LEN {
+            return Err(bad(format!(
+                "a {} key wrap is too short to hold a wrapped key",
+                self.kind.describe()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Associated data binding a wrap to one vault, so a wrap cannot be pasted into another.
 fn wrap_aad(vault_id: &Uuid) -> Vec<u8> {
     let mut aad = Vec::with_capacity(WRAP_AAD_PREFIX.len() + 16);
@@ -460,6 +502,31 @@ mod tests {
         let config = KdfConfig::calibrate(Duration::from_secs(600));
         assert_eq!(config.memory_kib, CALIBRATION_MEMORY_CEILING_KIB);
         assert!(config.iterations > MIN_ITERATIONS, "iterations should have absorbed the remainder");
+    }
+
+    #[test]
+    fn a_misshapen_wrap_is_refused_as_metadata_rather_than_reaching_the_kdf() {
+        // Argon2 rejects a salt under 8 bytes with an error of its own, which
+        // would be a way to tell one kind of tampering apart from every other
+        // credential failure. Caught while reading the metadata instead.
+        let kdf = KdfConfig::testing();
+        let vault = test_vault_id();
+        let good = wrap_master(&Key::random(), "secret", WrapKind::Passphrase, &kdf, &vault).unwrap();
+        let path = std::path::Path::new("vault.json");
+
+        assert!(good.validate(path).is_ok());
+
+        let mut short_salt = good.clone();
+        short_salt.salt.truncate(4);
+        assert!(matches!(short_salt.validate(path), Err(Error::MalformedMetadata { .. })));
+
+        let mut short_nonce = good.clone();
+        short_nonce.nonce.truncate(8);
+        assert!(matches!(short_nonce.validate(path), Err(Error::MalformedMetadata { .. })));
+
+        let mut short_ciphertext = good.clone();
+        short_ciphertext.ciphertext.truncate(16);
+        assert!(matches!(short_ciphertext.validate(path), Err(Error::MalformedMetadata { .. })));
     }
 
     #[test]

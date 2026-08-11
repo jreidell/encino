@@ -25,7 +25,11 @@ pub enum Request {
 }
 
 /// What the agent answers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand rather than derived: every unexpected-response
+/// path in the client formats one into an error message, and a derived `Debug`
+/// would print the master key into it.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub enum Response {
     /// The master key, base64-encoded.
@@ -49,6 +53,41 @@ pub enum Response {
         /// Why.
         message: String,
     },
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Response::MasterKey { expires_in, .. } => {
+                write!(f, "MasterKey {{ key: <redacted>, expires_in: {expires_in} }}")
+            }
+            Response::Status { vault, expires_in } => {
+                write!(f, "Status {{ vault: {vault:?}, expires_in: {expires_in} }}")
+            }
+            Response::Done => f.write_str("Done"),
+            Response::Error { message } => write!(f, "Error {{ message: {message:?} }}"),
+        }
+    }
+}
+
+impl Response {
+    /// Wipe any key material this response is carrying.
+    ///
+    /// [`Response::MasterKey`] holds base64 of the master key. Dropping it
+    /// normally leaves that copy in freed heap, which can be paged out — which
+    /// would undo much of what locking the key into physical memory buys the
+    /// agent in the first place.
+    ///
+    /// Best-effort by nature: only the buffer the `String` currently owns can be
+    /// reached, so a reallocation made while parsing is out of reach. It closes
+    /// the copy that is certainly there rather than every copy that might be.
+    pub fn zeroize_secrets(&mut self) {
+        use zeroize::Zeroize;
+
+        if let Response::MasterKey { key, .. } = self {
+            key.zeroize();
+        }
+    }
 }
 
 /// Name of the pipe serving one vault for one user. The vault id stops separate
@@ -76,10 +115,26 @@ pub fn socket_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("encino-{}", crate::unix::current_uid()))
 }
 
+/// Shorten a vault id for use in a socket name.
+///
+/// `sockaddr_un` caps the whole path at 104 bytes on macOS and 108 on Linux, and
+/// the directory it sits in is not this crate's to shorten: macOS hands out a
+/// per-user `TMPDIR` around 50 bytes long all by itself. A full 36-character
+/// UUID left roughly three bytes of headroom there, which is not headroom.
+///
+/// The first 64 bits of the id are kept — enough that two vaults on one machine
+/// colliding is not a practical concern — and the hyphens dropped, which is 20
+/// bytes back. Only the name changes; nothing about it is relied on for
+/// security, since the enclosing directory is what keeps other accounts out.
+#[cfg(unix)]
+fn short_vault_id(vault_id: &str) -> String {
+    vault_id.chars().filter(char::is_ascii_alphanumeric).take(16).collect()
+}
+
 /// Path of the socket serving one vault.
 #[cfg(unix)]
 pub fn socket_path(vault_id: &str) -> std::path::PathBuf {
-    socket_dir().join(format!("{vault_id}.sock"))
+    socket_dir().join(format!("{}.sock", short_vault_id(vault_id)))
 }
 
 #[cfg(test)]
@@ -134,12 +189,54 @@ mod tests {
         assert_ne!(a, b, "separate vaults must not share an agent");
         assert!(a.starts_with(socket_dir()));
 
-        // sockaddr_un caps the path at roughly 108 bytes.
+        // `sun_path` is 104 bytes on macOS and 108 on Linux, so the tighter of
+        // the two is the budget. The margin matters: this ran with three bytes
+        // to spare on macOS, whose per-user TMPDIR is around fifty on its own.
         assert!(
             a.as_os_str().len() < 100,
             "socket path is too long for sockaddr_un: {} bytes",
             a.as_os_str().len()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shortened_vault_id_stays_distinguishing_and_carries_no_separators() {
+        // A path separator smuggled in here would put the socket somewhere else
+        // entirely, so only alphanumerics survive.
+        assert_eq!(short_vault_id("9f1c2d3e-4b5a-6c7d-8e9f-0a1b2c3d4e5f"), "9f1c2d3e4b5a6c7d");
+        assert_eq!(short_vault_id("../../etc/passwd"), "etcpasswd");
+        assert!(!short_vault_id("a/b/c-d").contains('/'));
+
+        // 64 bits of the id is kept, which two vaults on one machine will not
+        // collide on; ids differing only past that point are not a real case.
+        assert_ne!(
+            short_vault_id("9f1c2d3e-4b5a-6c7d-8e9f-0a1b2c3d4e5f"),
+            short_vault_id("9f1c2d3e-4b5a-6c7e-8e9f-0a1b2c3d4e5f")
+        );
+    }
+
+    #[test]
+    fn a_response_never_prints_the_master_key() {
+        // Every unexpected-response path in the client formats one of these into
+        // an error message, which is then printed. A derived Debug leaks the key.
+        let response = Response::MasterKey { key: "c3VwZXItc2VjcmV0LWtleQ==".into(), expires_in: 1800 };
+        let rendered = format!("{response:?}");
+
+        assert!(!rendered.contains("c3VwZXI"), "the key reached a debug rendering: {rendered}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("1800"), "the harmless fields should still be legible");
+    }
+
+    #[test]
+    fn wiping_a_response_clears_the_key_it_carried() {
+        let mut response = Response::MasterKey { key: "c3VwZXItc2VjcmV0".into(), expires_in: 60 };
+        response.zeroize_secrets();
+
+        match response {
+            Response::MasterKey { key, .. } => assert!(key.is_empty(), "the key was left in place"),
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[cfg(unix)]

@@ -133,11 +133,15 @@ pub fn is_regular_file(path: &Path) -> bool {
 }
 
 /// Create a file that must not already exist, for staging plaintext.
+///
+/// Owner-only from the moment it exists. Widening it afterwards would leave a
+/// window in which the document was readable, and the file is renamed into the
+/// work area carrying whatever permissions it was created with.
 pub fn create_new(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
-        crate::fsutil::ensure_dir(parent)?;
+        crate::fsutil::ensure_private_dir(parent)?;
     }
-    File::create_new(path).map_err(|e| Error::io("create", path, e))
+    crate::fsutil::create_new_private(path)
 }
 
 #[cfg(test)]

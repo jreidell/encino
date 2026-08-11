@@ -824,3 +824,100 @@ fn folders_are_tidied_even_when_the_source_is_spelled_differently() {
     assert!(work_area_contents(&fixture.root).is_empty());
     assert!(!fixture.root.join("taxes").exists(), "empty folders survived — structure leaked");
 }
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn a_checked_out_document_is_not_readable_by_other_accounts() {
+    // `docs/threat-model.md` puts "another account on the same machine" in
+    // scope, and `open --all` tells the user their documents stay readable to
+    // anything running *as them*. Created through `File::create` these landed at
+    // 0644 under the ordinary umask, which is a different and much weaker claim.
+    let fixture = Fixture::new();
+    fixture.add("statement.pdf", b"closing balance 4102.55");
+
+    let mut session = fixture.session();
+    let path = session.checkout(&DocPath::new("statement.pdf").unwrap()).unwrap();
+
+    let mode = mode_of(&path);
+    assert_eq!(mode & 0o077, 0, "a decrypted document was left reachable by others: {mode:o}");
+    assert_eq!(mode & 0o600, 0o600, "the owner must still be able to read and write it");
+}
+
+#[cfg(unix)]
+#[test]
+fn exported_documents_are_not_readable_by_other_accounts() {
+    // An export is plaintext by definition, so it gets the same treatment as a
+    // checkout rather than whatever the umask happens to say.
+    let fixture = Fixture::new();
+    fixture.add("statement.pdf", b"closing balance");
+    fixture.add("taxes/2024/w2.pdf", b"wages 120000");
+
+    let dest = fixture.root.parent().unwrap().join("exported");
+    let session = fixture.session();
+    assert_eq!(session.export(&dest).unwrap(), 2);
+
+    for name in ["statement.pdf", "taxes/2024/w2.pdf"] {
+        let path = dest.join(name);
+        let mode = mode_of(&path);
+        assert_eq!(mode & 0o077, 0, "{name} was exported reachable by others: {mode:o}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_vaults_own_directory_is_not_open_to_other_accounts() {
+    // Blobs are ciphertext, but `staging` holds plaintext mid-checkout and
+    // `work.lock` names the machine and process using the vault.
+    let fixture = Fixture::new();
+    let vault = Vault::open(&fixture.root).unwrap();
+
+    let mode = mode_of(&vault.vault_dir());
+    assert_eq!(mode & 0o077, 0, ".encino was left reachable by others: {mode:o}");
+}
+
+#[test]
+fn a_session_reports_that_it_fell_back_to_the_backup_index() {
+    // Falling back is silent data loss: the backup is a generation old, so a
+    // document added since it was written vanishes from the index and its blob
+    // becomes an orphan. The caller cannot warn about what it is not told.
+    let fixture = Fixture::new();
+    fixture.add("statement.pdf", b"closing balance");
+    fixture.add("newest.pdf", b"a bank letter that arrived today");
+
+    let vault = Vault::open(&fixture.root).unwrap();
+    assert_eq!(fixture.session().len(), 2);
+    std::fs::write(vault.index_path(), b"corrupted beyond repair").unwrap();
+
+    let session = fixture.session();
+    assert!(session.recovered_from_backup(), "the caller must be told the index was damaged");
+    assert_eq!(session.len(), 1, "the backup generation predates the second document");
+    drop(session);
+
+    // And the good backup must survive the save that follows, or a second
+    // corruption would leave nothing at all to fall back to.
+    let mut session = fixture.session();
+    let source = fixture.stage_file("another.pdf", b"more");
+    session.add(&source, &DocPath::new("another.pdf").unwrap(), false).unwrap();
+    drop(session);
+
+    let recovered = Session::unlock(Vault::open(&fixture.root).unwrap(), PASSPHRASE).unwrap();
+    assert!(!recovered.recovered_from_backup(), "the index should be intact again");
+    assert_eq!(recovered.len(), 2);
+}
+
+#[test]
+fn an_ordinary_session_reports_nothing_to_recover() {
+    // The warnings above must stay rare enough to mean something.
+    let fixture = Fixture::new();
+    fixture.add("statement.pdf", b"closing balance");
+
+    let session = fixture.session();
+    assert!(!session.recovered_from_backup());
+    assert!(session.recovery_actions().is_empty());
+}

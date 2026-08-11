@@ -109,8 +109,9 @@ pub fn current_uid() -> u32 {
 /// verifying connecting clients a property of the agent, not merely of the
 /// filesystem underneath it.
 ///
-/// Linux only, because `SO_PEERCRED` is. Elsewhere the directory mode stands
-/// alone; macOS would want `getpeereid` and is untested regardless.
+/// Each supported Unix answers this its own way: `SO_PEERCRED` on Linux,
+/// `getpeereid` on macOS. Both ask the kernel rather than the caller, and both
+/// fail closed.
 #[cfg(target_os = "linux")]
 pub fn peer_is_this_user(stream: &std::os::unix::net::UnixStream) -> bool {
     // Fails closed. `SO_PEERCRED` is always available on the platform this is
@@ -121,8 +122,39 @@ pub fn peer_is_this_user(stream: &std::os::unix::net::UnixStream) -> bool {
     }
 }
 
-/// Without `SO_PEERCRED`, the 0700 directory is the whole control.
-#[cfg(not(target_os = "linux"))]
+/// macOS has no `SO_PEERCRED`. `getpeereid` is the BSD equivalent and gives the
+/// same guarantee: the credentials are recorded by the kernel when the peer
+/// connects, so a client cannot claim to be somebody else.
+///
+/// Declared here rather than pulled from `libc`, which is not otherwise a
+/// dependency of this crate. `rustix` exposes the Linux call only — its
+/// `socket_peercred` is `#[cfg(linux_kernel)]`.
+#[cfg(target_os = "macos")]
+pub fn peer_is_this_user(stream: &std::os::unix::net::UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+
+    let mut uid: u32 = u32::MAX;
+    let mut gid: u32 = u32::MAX;
+
+    // SAFETY: `stream` owns a live descriptor for the whole call, and both
+    // out-pointers address initialized locals of exactly the width `uid_t` and
+    // `gid_t` have on this platform.
+    let queried = unsafe { getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+
+    // Fails closed: the sentinel above is never a real uid, but the return code
+    // is what decides, so a failed call cannot be read as a match.
+    queried == 0 && uid == current_uid()
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    /// `getpeereid(2)`: the effective uid and gid of the peer on a Unix socket.
+    fn getpeereid(socket: std::ffi::c_int, euid: *mut u32, egid: *mut u32) -> std::ffi::c_int;
+}
+
+/// On any other Unix the 0700 directory is the whole control. Nothing else is
+/// claimed for those platforms; see `docs/threat-model.md`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn peer_is_this_user(_stream: &std::os::unix::net::UnixStream) -> bool {
     true
 }
@@ -202,6 +234,22 @@ mod tests {
         ensure_private_dir(&target).unwrap();
         ensure_private_dir(&target).expect("a second call on our own directory must succeed");
         assert!(target.is_dir());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_connection_from_this_process_is_recognised_as_ours() {
+        // Exercises the real kernel call on whichever platform this is. Without
+        // it the macOS branch would be FFI nobody had ever run.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+
+        assert!(peer_is_this_user(&accepted), "our own connection must be recognised as ours");
+        drop(client);
     }
 
     #[test]

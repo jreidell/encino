@@ -55,12 +55,20 @@ pub fn parse_duration(text: &str) -> Result<std::time::Duration, String> {
     };
 
     let value: u64 = digits.parse().map_err(|_| format!("{text:?} is not a duration, for example 30m"))?;
-    let seconds = match unit.trim().to_lowercase().as_str() {
-        "s" | "sec" | "secs" | "second" | "seconds" => value,
-        "m" | "min" | "mins" | "minute" | "minutes" => value * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => value * 3600,
+    let per_unit: u64 = match unit.trim().to_lowercase().as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
         other => return Err(format!("{other:?} is not a unit of time; use s, m, or h")),
     };
+
+    // Checked, because the multiplication is on a number the user typed. A
+    // wrapping one turns an absurd figure into a small plausible one — 12 hours
+    // in minutes, for instance, lands inside the cap below rather than being
+    // refused by it — so the session would silently be far shorter than asked
+    // for. Release builds wrap; debug builds panic outright.
+    let seconds =
+        value.checked_mul(per_unit).ok_or_else(|| format!("{text:?} is longer than any session may last"))?;
 
     if seconds == 0 {
         return Err("a session must last at least a second".into());
@@ -104,6 +112,20 @@ mod tests {
         assert!(parse_duration("12h").is_ok());
         assert!(parse_duration("13h").is_err());
         assert!(parse_duration("999h").is_err());
+    }
+
+    #[test]
+    fn a_duration_too_large_to_multiply_is_refused_rather_than_wrapped() {
+        // Unchecked, `value * 60` on this input wraps to 44 seconds, which walks
+        // straight through the 12-hour cap and silently gives a session three
+        // orders of magnitude shorter than the one asked for. In a debug build
+        // the same multiplication panics instead.
+        for absurd in ["307445734561825861m", "5124095576030431h", "18446744073709551615m"] {
+            assert!(parse_duration(absurd).is_err(), "{absurd:?} should have been refused");
+        }
+
+        // The seconds path has no multiplication, so the cap is the only guard.
+        assert!(parse_duration("18446744073709551615s").is_err());
     }
 
     #[test]

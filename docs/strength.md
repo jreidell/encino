@@ -540,10 +540,11 @@ At six words you are at 3.5 × 10¹¹ years against a serious attacker. Nobody w
 ever attack your passphrase directly. The realistic threats are the ones no
 amount of entropy touches:
 
-1. **Run on a BitLocker-encrypted volume.** Shredding cannot guarantee erasure
-   on an SSD — wear levelling means overwriting a logical block does not
-   reliably erase the physical one. Volume encryption is the actual mitigation,
-   and it matters more than any passphrase decision on this page.
+1. **Run on an encrypted volume** — BitLocker, FileVault, or LUKS. Shredding
+   cannot guarantee erasure on an SSD: wear levelling means overwriting a logical
+   block does not reliably erase the physical one, and on APFS a local snapshot
+   keeps the original blocks regardless. Volume encryption is the actual
+   mitigation, and it matters more than any passphrase decision on this page.
 2. **Store the recovery code properly.** It opens the vault outright. On paper,
    in a safe — not photographed, not in a password manager beside the
    passphrase, and not split across two places, which turns an impossible
