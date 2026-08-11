@@ -62,6 +62,12 @@ pub fn create_private(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// Apply the owner-only mode and open.
+///
+/// `mut` is unused on Windows, where the mode has no counterpart and the whole
+/// `cfg` block disappears — hence the allow, rather than a `mut` that clippy
+/// reports under `-D warnings` on one platform and needs on the other.
+#[cfg_attr(not(unix), allow(unused_mut))]
 fn open_private(mut options: OpenOptions, path: &Path) -> Result<File> {
     #[cfg(unix)]
     {

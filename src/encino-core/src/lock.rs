@@ -330,9 +330,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_lock_file_replaced_underneath_an_acquisition_does_not_yield_a_second_holder() {
-        // The end-to-end shape of the same thing: whatever happens to the file,
-        // two live `VaultLock`s for one path must never coexist.
+    fn a_recreated_lock_file_is_itself_exclusive() {
+        // Deleting `work.lock` by hand while it is held does strand the original
+        // holder on an unnamed inode, and the newcomer legitimately takes the
+        // recreated name — so for that one span there are two. Nothing can be
+        // done about a user removing the file; what must not follow is the
+        // recreated name being lockable twice over as well.
         let dir = tempfile::tempdir().unwrap();
         let path = lock_path(&dir);
 
